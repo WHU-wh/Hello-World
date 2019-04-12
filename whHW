@@ -1,1 +1,941 @@
 
+#include "stdafx.h"
+#include <iostream>
+#include "G3D/G3DepthMap.h"
+#include "G3DInitDepthMapimpl.h"
+#include "Types.h"
+#include "G3D/G3DepthMap.h"
+#include <CGAL/Simple_cartesian.h>
+#include <CGAL/Delaunay_triangulation_2.h>
+#include <CGAL/Projection_traits_xy_3.h>
+#include <boost/filesystem.hpp>
+#include "G3D/G3DResourceMan.h"
+#include "G3D/G3DPointCloudIO.h"
+#include "G3D/G3DMeshIO.h"
+#include "../../../CoreLibs/GpuDelaunay2D/gpudt.h"
+#include <boost/timer.hpp>
+
+namespace CGAL {
+	typedef CGAL::Simple_cartesian<double> kernel_t;
+	typedef CGAL::Projection_traits_xy_3<kernel_t> Geometry;
+	typedef CGAL::Delaunay_triangulation_2<Geometry> Delaunay;
+	typedef CGAL::Delaunay::Face_circulator FaceCirculator;
+	typedef CGAL::Delaunay::Face_handle FaceHandle;
+	typedef CGAL::Delaunay::Vertex_circulator VertexCirculator;
+	typedef CGAL::Delaunay::Vertex_handle VertexHandle;
+	typedef kernel_t::Point_3 Point;
+}
+
+namespace G3D
+{
+	G3DInitDepthMapImpl::G3DInitDepthMapImpl()
+	{
+
+	}
+
+	G3DInitDepthMapImpl::~G3DInitDepthMapImpl()
+	{
+		delete m_g3DepthMap;
+		//delete m_g3dDepthData;
+		m_g3DepthMap = nullptr;
+		//m_g3dDepthData = nullptr;
+	}
+
+	// center a patch of given size on the segment
+	//inline bool G3D::G3DInitDepthMapImpl::PreparePixelPatch(Point2i &lt0, const Point2i& x, const Point2i sizeRef)
+	//{
+	//	lt0.x = x.x -m_runPars.nSizeHalfWindow;
+	//	lt0.y = x.y -m_runPars.nSizeHalfWindow;
+	//	//const Point2i rb0{ lt0.x +m_runPars.nSizeWindow, lt0.y +m_runPars.nSizeWindow };
+	//	Point2i rb0;
+	//	rb0.x = lt0.x +m_runPars.nSizeWindow;
+	//	rb0.y = lt0.y +m_runPars.nSizeWindow;
+	//	return (IsInside(lt0, sizeRef) && IsInside(rb0, sizeRef));
+	//}
+
+
+	//inline float G3D::G3DInitDepthMapImpl::GetImage0Sum(const Point2i& p0, G3DepthData &m_g3dDepthData) {
+	//	const Point2i p1{ p0.x +m_runPars.nSizeWindow, p0.y };
+	//	const Point2i p2{ p0.x, p0.y +m_runPars.nSizeWindow };
+	//	const Point2i p3{ p0.x +m_runPars.nSizeWindow, p0.y +m_runPars.nSizeWindow };
+	//	return m_g3dDepthData.imageSum0(p3.y, p3.x) - m_g3dDepthData.imageSum0(p2.y, p2.x) - m_g3dDepthData.imageSum0(p1.y, p1.x) + m_g3dDepthData.imageSum0(p0.y, p0.x);
+	//}
+
+	// fetch the patch pixel values in the main image
+	//bool G3D::G3DInitDepthMapImpl::FillPixelPatch(Point2i &lt0, const Point2i& x, Camera camera, G3DepthData &m_g3dDepthData, TexelVec &m_texels0)
+	//{
+	//	cv::Mat_<G3DFloat> image = m_g3dDepthData.ViewDataArr[0].g3dImage.pixelMat;
+	//	int n = 0;
+	//	for (int i = 0; i <m_runPars.nSizeWindow; ++i) {
+	//		for (int j = 0; j <m_runPars.nSizeWindow; ++j) {
+	//			m_texels0(n++) = image(lt0.y + i, lt0.x + j);
+	//		}
+	//	}
+	//	assert(n ==m_runPars.nTexels);
+
+	//	m_g3dDepthData.normSq0 = normSqDelta<float, float, 49>((float*)(m_texels0.data()), GetImage0Sum(lt0, m_g3dDepthData)*(1.f /m_runPars.nTexels));
+	//	m_g3dDepthData.X0 = pointI2C(camera, Point3d{ (double)x.x, (double)x.y, double(1.0) });
+	//	//m_g3dDepthData.X0 = pointI2C(camera, Point3f{ (float)x.x, (float)x.y, 1 });
+	//	return (m_g3dDepthData.normSq0 >m_runPars.thMagnitudeSq);
+	//}
+	
+#pragma  region[稀疏物方点云投影构二维三角网]
+
+	/**
+	*@brief 稀疏物方点云投影构二维三角网
+	*/
+	G3D::Point2f G3DInitDepthMapImpl::GpuDelaunay2D(G3DDataSet * g3dt, const ImageInfo& image, const IndxArr& points, PGPUDTPARAMS &pInput, PGPUDTOUTPUT &pOutput, G3D::Mesh &mesh)
+	{
+		boost::timer bs_timer;//计时
+		Point2f depthBounds;
+		depthBounds.x = FLT_MAX;
+		depthBounds.y = 0.f;
+
+		pInput = NULL;/*初始化输入数据*/
+		pOutput = NULL;
+		pInput->nPoints = points.size()+4;
+		pInput->points = new gpudtVertex[points.size()+4];
+		std::map<int, G3DFloat> depthsPair;
+	
+		for (int p = 0; p < points.size(); p++)
+		{
+			const Point3f pointf = g3dt->pointCloud.points[points[p]];
+			const Point3d point = { pointf.x,pointf.y,pointf.z };
+			const Point3d ptCam = PointW2C(image.cam, point);
+			const Point2d ptImg = PointC2I(image.cam, ptCam);
+			G3DFloat depth = (float)ptCam.z;
+			if (depthBounds.x > depth)
+				depthBounds.x = depth;
+			if (depthBounds.y < depth)
+				depthBounds.y = depth;
+
+			pInput->points[p].x = ptImg.x;
+			pInput->points[p].y = ptImg.y;
+			depthsPair.insert(std::make_pair(p, depth));
+		}
+		pInput->points[points.size()].x = (G3DFloat)0;
+		pInput->points[points.size()].y = (G3DFloat)0;
+		pInput->points[points.size() + 1].x = (G3DFloat)image.width;
+		pInput->points[points.size() + 1].y = (G3DFloat)0;
+		pInput->points[points.size() + 2].x = (G3DFloat)0;
+		pInput->points[points.size() + 2].y = (G3DFloat)image.height;
+		pInput->points[points.size() + 3].x = (G3DFloat)image.width;
+		pInput->points[points.size() + 3].y = (G3DFloat)image.height;
+
+		for (int jj = 0; jj < 4; jj++)
+			depthsPair.insert(std::make_pair(points.size() + jj, image.avgDepth));
+
+		pInput->nConstraints = 0;
+		int fboSize = 2048;  //要使用的纹理大小(变量)
+		pInput->fboSize = fboSize;
+		//找最小最大xy坐标
+		REAL minx = 1E20, miny = 1E20;
+		REAL maxx = -1E20, maxy = -1E20;
+		for (int i = 0; i < pInput->nPoints; i++){
+			if (pInput->points[i].x > maxx)
+				maxx = pInput->points[i].x;
+			if (pInput->points[i].x < minx)
+				minx = pInput->points[i].x;
+			if (pInput->points[i].y > maxy)
+				maxy = pInput->points[i].y;
+			if (pInput->points[i].y < miny)
+				miny = pInput->points[i].y;
+		}
+		pInput->maxX = maxx;
+		pInput->maxY = maxy;
+		pInput->minX = minx;
+		pInput->minY = miny;
+
+		//调用GPU静态库接口函数  得到OUTPUT三角面结果
+		if (pOutput)
+			gpudtReleaseDTOutput(pOutput);
+		pOutput = gpudtComputeDT(pInput);
+		//获取所有三角面顶点坐标  并写入三维坐标至mesh中
+		for (int i = 0; i < pOutput->nTris; i++) {
+			Point3f V0{ pInput->points[pOutput->triangles[i].vtx[0]].x ,pInput->points[pOutput->triangles[i].vtx[0]].y,depthsPair[pOutput->triangles[i].vtx[0]] };
+			Point3f V1{ pInput->points[pOutput->triangles[i].vtx[1]].x ,pInput->points[pOutput->triangles[i].vtx[1]].y,depthsPair[pOutput->triangles[i].vtx[1]] };
+			Point3f V2{ pInput->points[pOutput->triangles[i].vtx[2]].x ,pInput->points[pOutput->triangles[i].vtx[2]].y,depthsPair[pOutput->triangles[i].vtx[2]] };	
+			mesh.vertices.push_back(V0);
+			mesh.vertices.push_back(V1);
+			mesh.vertices.push_back(V2);
+			mesh.faces.push_back(Mesh::Face{ pOutput->triangles[i].vtx[0] ,pOutput->triangles[i].vtx[1] ,pOutput->triangles[i].vtx[2] });
+		}
+		G3D::G3DTriMesh triMesh(mesh);
+		triMesh.ListIncidenteFaces();// 计算点与面之间的邻接关系
+		triMesh.ComputeFFAdj();// 计算面与面之间的邻接关系
+
+		//重新计算4个角点的深度值Z
+		bool bAddCorners = true;
+		if (bAddCorners) {
+			typedef Eigen::Map< Eigen::VectorXf, Eigen::Unaligned, Eigen::InnerStride<2> > FloatMap;
+			/* 影像四个角点，深度值初始化为影像平均深度avgDepth */
+			const Point3f vcorners[] = {
+				{ 0, 0, image.avgDepth },
+				{ image.width, 0, image.avgDepth },
+				{ 0, image.height, image.avgDepth },
+				{ image.width, image.height, image.avgDepth }
+			};
+
+			/* 循环四个角点，由其最临近的三个三角形重新计算角点深度值 */
+			const size_t numPoints = 3;
+			for (int i = 0; i < 4; ++i) {	
+				G3DArray< G3DIdx> VertFaceIds = triMesh.vfs[points.size()+i];//以当前角点为顶点的 三角面 数组
+				Point3f vcorner = vcorners[i];//当前角点
+				Point3d& poszA = (Point3d&)vcorner;
+				const Point2d& posA = (const Point2d&)poszA;
+				Point3f pt333 = PointI2C(image.cam, Point2f{ (G3DFloat)posA.x,(G3DFloat)posA.y });
+				Point3f pt33 = Normalized(pt333);
+				const G3DMath::Ray3d rayA(Point3f{ 0.0, 0.0, 0.0 }, pt33);
+				std::vector<DepthDist> depths(numPoints, { 0.f,0.f });
+
+				for (int vi = 0 ; vi < VertFaceIds.size(); vi++ )//遍历邻近的面  
+				{
+					//确认当前三角面 是否为 无限面
+					/*		CGAL::FaceCirculator cfc(delaunay.incident_faces(vcorner));
+					if (cfc == 0)
+					continue;
+					const CGAL::FaceCirculator done(cfc);*/
+	
+					G3DArray< G3DIdx> nbrFacetIds = triMesh.ffs[VertFaceIds[vi]];//以当前角点为顶点的某个三角面 的所有邻近三角面 数组
+					for (int fi = 0; fi < nbrFacetIds.size(); fi++)//遍历邻近的面  
+					{
+						//得到当前邻近三角面的三个顶点
+						G3D::TPoint3<uint32_t> face = mesh.faces[nbrFacetIds[fi]];
+						{
+							const Point3d& poszB0 = Point3d{ G3Double(mesh.vertices[face[0]].x), G3Double(mesh.vertices[face[0]].y), G3Double(mesh.vertices[face[0]].z) };
+							const Point3d& poszB1 = Point3d{ G3Double(mesh.vertices[face[1]].x), G3Double(mesh.vertices[face[1]].y), G3Double(mesh.vertices[face[1]].z) };
+							const Point3d& poszB2 = Point3d{ G3Double(mesh.vertices[face[2]].x), G3Double(mesh.vertices[face[2]].y), G3Double(mesh.vertices[face[2]].z) };
+							//确认该三角面所有顶点不包括 四个角点??
+							for (int j = 0; j < 4; ++j)
+							{
+								Point3f corner = vcorners[j];
+								if (corner.x = poszB0.x)
+								{
+								}
+							}
+							const G3DMath::Planed planeB(
+								PointI2C(image.cam, poszB0),
+								PointI2C(image.cam, poszB1),
+								PointI2C(image.cam, poszB2)
+							);
+							auto tmp = rayA.Intersects(planeB);
+							/* 得到Eigen::Matrix  转换为G3D::Point3f */
+							Point3d poszB;
+							poszB[0] = tmp(0, 0); poszB[1] = tmp(1, 0); poszB[2] = tmp(2, 0);
+							if (poszB.z <= 0)
+								continue;
+							const Point2d posB(((const Point2d&)poszB0 + (const Point2d&)poszB1 + (const Point2d&)poszB2) / 3.f);
+							const double dist(Norm(posB - posA));//计算该三角面的深度值权重
+							DepthDist dps;
+							dps.idx = (float)poszB.z; dps.score = 1.f / (float)dist;
+							G3D::StoreTop<DepthDist, numPoints>(depths, dps);
+						}
+					}
+	
+			  }
+				if (depths.size() != numPoints)
+					continue;
+				FloatMap vecDists(&depths[0].score, numPoints);
+				vecDists *= 1.f / vecDists.sum();
+				FloatMap vecDepths(&depths[0].idx, numPoints);
+				//poszA.z = vecDepths.dot(vecDists);
+				mesh.vertices[points.size() + i].z= vecDepths.dot(vecDists);
+			}
+
+
+
+		}
+
+
+		LogI("GPUDelaunay构三角网耗时: %s\n", bs_timer.elapsed());
+		return depthBounds;
+	}
+
+
+	/**
+	*@brief 稀疏物方点云投影构二维三角网
+	*/
+	G3D::Point2f G3DInitDepthMapImpl::TriangulatePointsDelaunay(G3DDataSet * g3dt, void* delaunayPtr, const ImageInfo& image, const IndxArr& points)
+	{
+		CGAL::Delaunay& delaunay = *(CGAL::Delaunay*)(delaunayPtr);
+		/*	assert(sizeof(Point3) == sizeof(X3D));
+		assert(sizeof(Point3) == sizeof(CGAL::Point));*/
+		Point2f depthBounds;
+		depthBounds.x = FLT_MAX;
+		depthBounds.y = 0.f;
+
+		for (int p = 0; p < points.size(); p++)
+		{
+			const Point3f pointf = g3dt->pointCloud.points[points[p]];
+			const Point3d point = { pointf.x,pointf.y,pointf.z };
+			const Point3d ptCam = PointW2C(image.cam, point);
+			const Point2d ptImg = PointC2I(image.cam, ptCam);
+			delaunay.insert(CGAL::Point(ptImg.x, ptImg.y, ptCam.z));
+			G3DFloat depth = (float)ptCam.z;
+			if (depthBounds.x > depth)
+				depthBounds.x = depth;
+			if (depthBounds.y < depth)
+				depthBounds.y = depth;
+		}
+
+		bool bAddCorners = true;
+		if (bAddCorners) {
+			/* typedef G3DArr(DepthDist) DepthDistArr; */
+			typedef Eigen::Map< Eigen::VectorXf, Eigen::Unaligned, Eigen::InnerStride<2> > FloatMap;
+			/* 在影像的四角插入四个角点，深度值初始化为影像平均深度avgDepth */
+			const CGAL::VertexHandle vcorners[] = {
+				delaunay.insert(CGAL::Point(0, 0, image.avgDepth)),
+				delaunay.insert(CGAL::Point(image.width, 0, image.avgDepth)),
+				delaunay.insert(CGAL::Point(0, image.height, image.avgDepth)),
+				delaunay.insert(CGAL::Point(image.width, image.height, image.avgDepth))
+
+			};
+			/* 循环四个角点，由其最临近的三个三角形重新计算角点深度值 */
+			const size_t numPoints = 3;
+			for (int i = 0; i < 4; ++i) {
+				CGAL::VertexHandle vcorner = vcorners[i];
+				CGAL::FaceCirculator cfc(delaunay.incident_faces(vcorner));
+				if (cfc == 0)
+					continue; 
+				const CGAL::FaceCirculator done(cfc);
+				Point3d& poszA = (Point3d&)vcorner->point();
+				const Point2d& posA = (const Point2d&)poszA;
+				Point3f pt333 = PointI2C(image.cam, Point2f{ (G3DFloat)posA.x,(G3DFloat)posA.y });
+				Point3f pt33 = Normalized(pt333);
+				const G3DMath::Ray3d rayA(Point3f{ 0.0, 0.0, 0.0 }, pt33);
+
+				std::vector<DepthDist> depths(numPoints, {0.f,0.f});
+				//DepthDistArr depths(0, numPoints);
+				do {
+					CGAL::FaceHandle fc(cfc->neighbor(cfc->index(vcorner)));
+					if (fc == delaunay.infinite_face())
+						continue;
+					for (int j = 0; j < 4; ++j)
+						if (fc->has_vertex(vcorners[j]))
+							goto Continue;
+					/* 角点深度值 为角点光线与三角面平面的交点来计算 */
+					{
+						G3D::Point3d poszB00, poszB11, poszB22;
+						const Point3d& poszB0 = (const Point3d&)fc->vertex(0)->point();
+						const Point3d& poszB1 = (const Point3d&)fc->vertex(1)->point();
+						const Point3d& poszB2 = (const Point3d&)fc->vertex(2)->point();
+						const G3DMath::Planed planeB(
+							PointI2C(image.cam, poszB0),
+							PointI2C(image.cam, poszB1),
+							PointI2C(image.cam, poszB2)
+						);
+						auto tmp = rayA.Intersects(planeB);
+						/* 得到Eigen::Matrix  转换为G3D::Point3f */
+						Point3d poszB;
+						poszB[0] = tmp(0, 0); poszB[1] = tmp(1, 0); poszB[2] = tmp(2, 0);
+						if (poszB.z <= 0)
+							continue;
+						const Point2d posB(((const Point2d&)poszB0 + (const Point2d&)poszB1 + (const Point2d&)poszB2) / 3.f);
+						const double dist(Norm(posB - posA));
+						DepthDist dps;
+						dps.idx = (float)poszB.z; dps.score = 1.f / (float)dist;
+						//depths.StoreTop<numPoints>(dps);
+						G3D::StoreTop<DepthDist,numPoints>(depths, dps);
+					}
+				Continue:;
+				} while (++cfc != done);
+				if (depths.size() != numPoints)
+					continue; 
+				FloatMap vecDists(&depths[0].score, numPoints);
+				vecDists *= 1.f / vecDists.sum();
+				FloatMap vecDepths(&depths[0].idx, numPoints);
+				poszA.z = vecDepths.dot(vecDists);
+			}
+		}
+		return depthBounds;
+	}
+#pragma endregion
+
+	/**
+	*@brief 根据索引图  生成一张可信度图
+	*/
+	void G3DInitDepthMapImpl::InitConfbycoords(const ImageInfo& image)
+	{
+		const Point2i dmSize{ m_g3dDepthData->depthMap().cols, m_g3dDepthData->depthMap().rows };
+		//TexelVec m_texels0(OPTDENSE::nSizeWindow*OPTDENSE::nSizeWindow);
+		 /* 根据索引图  生成一张conf图 */
+		for (int i = 0; i < m_g3dDepthData->coords.size(); i++)
+		{
+			const Point2i& x = m_g3dDepthData->coords[i];
+			 /* 一个像素循环期间的固定值 */
+			Point2i &lt0 = m_g3dDepthData->lt0;
+			 /* 判断以当前像元x为中心是否可形成7×7窗口以及窗口内灰度方差是否符合阈值 */
+			if (!PreparePixelPatch(lt0, x, dmSize, m_runPars.nSizeWindow) || !FillPixelPatch(x, image.cam, *m_g3dDepthData, m_texels0, m_runPars)) {
+				m_g3dDepthData->depthMap()(x.y, x.x) = 0;
+				m_g3dDepthData->normalMap()(x.y, x.x) = { 0,0,0 };
+				m_g3dDepthData->confMap()(x.y, x.x) = EncodeScoreScale(2.f);
+				continue;
+			}
+			G3DFloat &depth = m_g3dDepthData->depthMap()(x.y, x.x);
+			auto& normal = m_g3dDepthData->normalMap()(x.y, x.x);
+			if (depth <= 0) {
+				 /* 深度值和法向量随机扰动赋值 */
+				depth = RandomDepth(m_g3dDepthData->ioData.dMin, m_g3dDepthData->ioData.dMax);
+				normal = RandomNormal();
+			}
+			else if (normal[2] >= 0) {
+				 /* 用随机后的法向量替换无效法向量 */
+				normal = RandomNormal();
+			}
+			 /* 通过新的深度值、法向量重新计算并更新可信度值 */
+			m_g3dDepthData->confMap()(x.y, x.x) = EncodeScoreScale(ScorePixel(depth, normal));
+		}
+	}
+
+	/**
+	*@brief 初始化可信度图
+	*/
+	bool G3DInitDepthMapImpl::InitConfMap(cv::Mat_<G3DFloat>& confMap, const ImageInfo& image)
+	{
+		auto& imageData = m_g3dDepthData->ViewDataArr[0].g3dImage;
+		const cv::Size prevDepthMapSize;
+		cv::Mat_<G3DFloat> &imageSum0 = m_g3dDepthData->imageSum0;
+		cv::Size sizeRef(m_g3dDepthData->depthMap().size());
+		imageSum0.create(m_g3dDepthData->depthMap().size());
+		::memset(imageSum0.data, 0, imageSum0.step[0] * imageSum0.rows);
+		 /* 得到参考影像的imageSum0积分图 */
+		cv::integral(imageData.pixelMat, imageSum0, CV_32F);
+		 /* 初始化索引图 */
+		MapMatrix2ZigzagIdx(sizeRef, m_g3dDepthData->coords, MAXF(64,m_runPars.nMaxThreads * 8));
+		m_g3dDepthData->scores.resize(m_g3dDepthData->neighbors.size());
+		 /* 根据索引图  生成一张conf图 */
+		InitConfbycoords(image);
+		return true;
+	}
+	
+	/**
+	*@brief 加速计算单应矩阵H
+	*/
+	Mat44 G3DInitDepthMapImpl::ComputeHMatrix(G3DepthData::ViewData& vd, const cv::Vec3f& normal, float scale)
+	{
+		/* SSE加速 */
+		auto &sseHr = vd.sseHr;
+		auto &sseHrl = vd.sseHlr;
+		auto& sseRes = m_spData.sseRes;
+		auto& sseX = m_spData.sseX;
+		auto& sseN = m_spData.sseN;
+		auto& sseXN = m_spData.sseXN;
+		auto& sseH = m_spData.sseH;
+		{	
+			double* Hm = (double*)(vd.Hm.data);
+			sseX.m[0][0] = Hm[0];
+			sseX.m[1][0] = Hm[1];
+			sseX.m[2][0] = Hm[2];
+
+			sseN.m[0][0] = normal[0];
+			sseN.m[0][1] = normal[1];
+			sseN.m[0][2] = normal[2];
+			matmult_AVX_4mem(sseXN, sseX, sseN);
+			matmult_AVX_4mem(sseRes, sseXN, sseHr);
+			matmult_SSE(sseRes, sseRes, scale);
+			matadd_SSE(sseH, sseRes, sseHrl);
+		}
+		return  sseH;
+	}
+
+	/**
+	*@brief 双线性内插
+	*/
+	float G3DInitDepthMapImpl::ImageLinearSimple(G3D::Point2f &pt, float &fracX, float &fracY, cv::Mat_<float> pixelImage)
+	{
+		int X1 = pt.x;
+		int Y1 = pt.y;
+		fracX = pt.x - X1;
+		fracY = pt.y - Y1;
+
+		const float& val0 = pixelImage(Y1, X1);
+		const float& val1 = pixelImage(Y1, X1 + 1);
+		const float& val2 = pixelImage(Y1 + 1, X1);
+		const float& val3 = pixelImage(Y1 + 1, X1 + 1);
+
+		float temp1 = val0 * (1 - fracX) + val1 * fracX;
+		float temp2 = val2 * (1 - fracX) + val3 * fracX;
+		return  temp1 * (1 - fracY) + temp2 * fracY;
+	}
+
+
+	void G3DInitDepthMapImpl::CalScores(G3DArray<G3DFloat>& scores,const cv::Vec3f normal,const float scale)
+	{
+		const Point2i& lt0 = m_g3dDepthData->lt0;
+		auto& fracX = m_spData.fracX;
+		auto& fracY = m_spData.fracY;
+		bool& next_image = m_spData.NextNeigbor;
+		auto& n = m_spData.N;
+		auto& normSq1 = m_spData.NormSq1;
+		auto& nrm = m_spData.Nrm;
+		auto& ncc = m_spData.NCC;
+		auto& pt = m_spData.Pt;
+		for (int idx = 1; idx < m_g3dDepthData->ViewDataArr.size(); idx++)
+		{
+			next_image = false;
+			auto& vd = m_g3dDepthData->ViewDataArr[idx];
+			cv::Mat_<float> pixelImage = m_g3dDepthData->ViewDataArr[idx].g3dImage.pixelMat;
+			G3DFloat& score = scores[idx - 1];
+			/* SSE加速计算单应矩阵H */
+			Mat44& sseH = ComputeHMatrix(vd, normal, scale);
+			n = 0;
+			for (int i = 0; i < m_runPars.nSizeWindow; ++i)
+			{
+				for (int j = 0; j < m_runPars.nSizeWindow; ++j)
+				{
+					Point2f X{ (G3DFloat)(lt0.x + j), (G3DFloat)(lt0.y + i) };
+					{
+						const G3D::G3DFloat invZ = (1 / (sseH.m[2][0] * X[0] + sseH.m[2][1] * X[1] + sseH.m[2][2]));
+						pt[0] = (sseH.m[0][0] * X[0] + sseH.m[0][1] * X[1] + sseH.m[0][2]) *invZ;
+						pt[1] = (sseH.m[1][0] * X[0] + sseH.m[1][1] * X[1] + sseH.m[1][2])*invZ;
+					}
+					if (pt.x >= 1 && pt.y >= 1 &&
+						pt.x < pixelImage.cols - 1 && pt.y < pixelImage.rows - 1)
+					{
+						m_texels1(n++) = ImageLinearSimple(pt, fracX, fracY, pixelImage);
+					}
+					else
+					{
+						score = 2.f;
+						next_image = true;
+						break;
+					}
+				}
+				if (next_image)
+					break;
+			}
+			if (next_image){
+				continue;
+			}
+			{
+				assert(n == m_runPars.nTexels);
+				/* 计算参考影像和和邻近影像像元位置7*7纹理块的相似性得分 */
+				normSq1 = (normSqZeroMean<float, float, 49>(m_texels1.data()));
+				nrm = (m_g3dDepthData->normSq0*normSq1);
+				if (nrm == 0.f) {
+					score = 1.f;
+					continue;
+				}
+				ncc = innerProduct_SSE((float*)(&m_texels0[0]), (float*)(&m_texels1[0]), 49) / SQRT(nrm);
+				score = 1.f - CLAMP(ncc, -1.f, 1.f);
+			}
+		}
+
+	}
+
+
+	/**
+	*@brief 计算某个像元的可信度值
+	*/
+	float G3DInitDepthMapImpl::ScorePixel(G3DFloat depth, const cv::Vec3f normal)
+	{
+		assert(normal[2] < 0);
+		 /* 所有邻近影像的得分 */							  
+		G3DArray<G3DFloat>& scores(m_g3dDepthData->scores);
+		//auto& fracX = m_spData.fracX;
+		//auto& fracY = m_spData.fracY;
+		//bool& next_image = m_spData.NextNeigbor;
+		//auto& n = m_spData.N;
+		//auto& normSq1 = m_spData.NormSq1;
+		//auto& nrm = m_spData.Nrm;
+		//auto& ncc = m_spData.NCC;
+		//auto& pt = m_spData.Pt;
+		cv::Vec3d* vcX0 = (cv::Vec3d*)(&m_g3dDepthData->X0);
+		float scale = 1.0 / (normal.dot(*vcX0)*depth);
+		CalScores(scores, normal, scale);
+		 /* 排序后取第m_idxScore大的值作为返回更新的可信度值 */
+		std::nth_element(scores.begin(), (scores.begin() + m_idxScore), scores.end());
+		return (scores.size() > 1 ? scores[m_idxScore] : scores[0]);
+	}
+
+
+
+
+
+//float G3DInitDepthMapImpl::ScorePixel(const Point2i& x, const ImageInfo& image0, G3DFloat depth, const cv::Vec3f& normal, G3DepthData &m_g3dDepthData, G3DDataSet *g3dt, Point3d& X0)
+//{
+//	assert(normal[2] < 0);
+//	const Point2i& lt0 = m_g3dDepthData.lt0;
+//	//所有邻近影像的 得分									  
+//	G3DArray<G3DFloat>& scores(m_g3dDepthData.scores);
+//	auto& fracX = m_spData.fracX;
+//	auto& fracY = m_spData.fracY;
+//	bool& next_image = m_spData.NextNeigbor;
+//	auto& n = m_spData.N;
+//	auto& normSq1 = m_spData.NormSq1;
+//	auto& nrm = m_spData.Nrm;
+//	auto& ncc = m_spData.NCC;
+//	auto& pt = m_spData.Pt;
+//
+//	for (int idx = 1; idx < m_g3dDepthData.ViewDataArr.size(); idx++)
+//	{
+//		next_image = false;
+//		auto& vd = m_g3dDepthData.ViewDataArr[idx];
+//		cv::Mat_<float> pixelImage = m_g3dDepthData.ViewDataArr[idx].g3dImage.pixelMat;
+//		G3DFloat& score = scores[idx-1];
+//
+//		
+//		//原始
+//		//Point3f tmpnormal;
+//		//tmpnormal.x = normal[0]; tmpnormal.y = normal[1]; tmpnormal.z = normal[2];
+//		//const 	cv::Matx33f H = (ComputeHomographyMatrix(image0.cam, m_g3dDepthData.ViewDataArr[idx].g3dImage.baseInfo.cam, depth, tmpnormal, X0));
+//		//const 	cv::Matx33d&  H(ComputeHomographyMatrix(image0.cam, image1.cam, depth, normal, X0));
+//		//;
+//		//SSE加速
+//		//auto& H = m_spData.H;
+//		auto &sseHr = vd.sseHr;
+//		auto &sseHrl = vd.sseHlr;
+//		auto& sseRes = m_spData.sseRes;
+//		auto& sseX = m_spData.sseX;
+//		auto& sseN = m_spData.sseN;
+//		auto& sseXN = m_spData.sseXN;
+//		auto& sseH = m_spData.sseH;
+//		{
+//			cv::Vec3d* vcX0 = (cv::Vec3d*)(&X0);
+//			float scale = 1.0 / (normal.dot(*vcX0)*depth);
+//			double* Hm = (double*)(vd.Hm.data);
+//
+//			sseX.m[0][0] = Hm[0];
+//			sseX.m[1][0] = Hm[1];
+//			sseX.m[2][0] = Hm[2];
+//
+//			sseN.m[0][0] = normal[0];
+//			sseN.m[0][1] = normal[1];
+//			sseN.m[0][2] = normal[2];
+//			matmult_AVX_4mem(sseXN, sseX, sseN);
+//			matmult_AVX_4mem(sseRes, sseXN, sseHr);
+//			//Mat44 scaleM;
+//			matmult_SSE(sseRes, sseRes, scale);
+//			matadd_SSE(sseH, sseRes, sseHrl);
+//			//H(0, 0) = vd.Hlr(0, 0) + sseRes.m[0][0] * scale;
+//			//H(0, 1) = vd.Hlr(0, 1) + sseRes.m[0][1] * scale;
+//			//H(0, 2) = vd.Hlr(0, 2) + sseRes.m[0][2] * scale;
+//
+//			//H(1, 0) = vd.Hlr(1, 0) + sseRes.m[1][0] * scale;
+//			//H(1, 1) = vd.Hlr(1, 1) + sseRes.m[1][1] * scale;
+//			//H(1, 2) = vd.Hlr(1, 2) + sseRes.m[1][2] * scale;
+//
+//			//H(2, 0) = vd.Hlr(2, 0) + sseRes.m[2][0] * scale;
+//			//H(2, 1) = vd.Hlr(2, 1) + sseRes.m[2][1] * scale;
+//			//H(2, 2) = vd.Hlr(2, 2) + sseRes.m[2][2] * scale;
+//		}
+//		////cv::Mat norm(1, 3, CV_32F, (void*)(&normal));
+//		//cv::Mat_<double> norm(3, 1, CV_64FC1);
+//		//norm.at<double>(0, 0) = normal[0];
+//		//norm.at<double>(1, 0) = normal[1];
+//		//norm.at<double>(2, 0) = normal[2];
+//		//cv::Vec3d* vcX0 = (cv::Vec3d*)(&X0);
+//		//const cv::Mat_<float> H = vd.Hlr + vd.Hm * norm.t() * (1 / (norm.dot(*vcX0)*depth)) * vd.Hr;
+//
+//		n = 0;
+//		for (int i = 0; i <m_runPars.nSizeWindow; ++i)
+//		{
+//			for (int j = 0; j <m_runPars.nSizeWindow; ++j)
+//			{
+//				//ProjectVertex_3x3_2_2(H, Point2f{ (G3DFloat)(lt0.x + j), (G3DFloat)(lt0.y + i) }, pt);
+//				//Point2f X{ (G3DFloat)(lt0.x + j), (G3DFloat)(lt0.y + i) };
+//				//{
+//				//	const G3D::G3DFloat invZ = (1 / (H(2, 0) * X[0] + H(2, 1) * X[1] + H(2, 2)));
+//				//	pt[0] = (H(0, 0) * X[0] + H(0, 1) * X[1] + H(0, 2)) *invZ;
+//				//	pt[1] = (H(1, 0)* X[0] + H(1, 1) * X[1] + H(1, 2))*invZ;
+//				//}
+//
+//				Point2f X{ (G3DFloat)(lt0.x + j), (G3DFloat)(lt0.y + i) };
+//				{
+//					const G3D::G3DFloat invZ = (1 / (sseH.m[2][0] * X[0] + sseH.m[2][1] * X[1] + sseH.m[2][2]));
+//					pt[0] = (sseH.m[0][0] * X[0] + sseH.m[0][1] * X[1] + sseH.m[0][2]) *invZ;
+//					pt[1] = (sseH.m[1][0] * X[0] + sseH.m[1][1] * X[1] + sseH.m[1][2])*invZ;
+//				}
+//
+//				//if (!isInsideWithBorder(m_g3dDepthData.confMap, pt, 1))
+//				//if (pt.x < 1 || pt.y < 1 ||
+//				//	pt.x >= pixelImage.cols - 1 || pt.y >= pixelImage.rows - 1)
+//				if (pt.x >= 1 && pt.y >= 1 &&
+//					pt.x < pixelImage.cols - 1 && pt.y < pixelImage.rows - 1)
+//				{
+//					//m_texels1(n++) = imageLinearSimple(cv::Mat_<float>(pixelImage), pt);
+//					//双线性内插
+//					int X1 = pt.x;
+//					int Y1 = pt.y;
+//					fracX = pt.x - X1;
+//					fracY = pt.y - Y1;
+//
+//					const float& val0 = pixelImage(Y1, X1);
+//					const float& val1 = pixelImage(Y1, X1 + 1);
+//					const float& val2 = pixelImage(Y1 + 1, X1);
+//					const float& val3 = pixelImage(Y1 + 1, X1 + 1);
+//
+//					float temp1 = val0 * (1 - fracX) + val1 * fracX;
+//					float temp2 = val2 * (1 - fracX) + val3 * fracX;
+//					m_texels1(n++) = temp1 * (1 - fracY) + temp2 * fracY;
+//				}
+//				else
+//				{
+//					score = 2.f;
+//					next_image = true;
+//					break;
+//				}
+//			}
+//			if (next_image)
+//				break;
+//		}
+//		if (next_image)
+//		{
+//			continue;
+//		}
+//		{
+//			assert(n ==m_runPars.nTexels);
+//			//计算参考影像和和邻近影像像元位置7*7纹理块的相似性得分
+//			normSq1 = (normSqZeroMean<float, float, 49>(m_texels1.data()));
+//			nrm = (m_g3dDepthData.normSq0*normSq1);
+//			if (nrm == 0.f) {
+//				score = 1.f;
+//				continue;
+//			}
+//
+//			//ncc = (m_texels0.dot(m_texels1) / SQRT(nrm));
+//			ncc = innerProduct_SSE((float*)(&m_texels0[0]), (float*)(&m_texels1[0]), 49) / SQRT(nrm);
+//			score = 1.f - CLAMP(ncc, -1.f, 1.f);
+//		}
+//	}
+//	//排序后取第m_idxScore大的值作为返回更新的可信度值
+//	std::nth_element(scores.begin(), (scores.begin() + m_idxScore), scores.end());
+//	return (scores.size() > 1 ? scores[m_idxScore] : scores[0]);
+//
+//}
+
+#pragma
+
+/**
+*@brief 通过三角面光栅化内插计算初始深度图&法向量图
+*/
+void  G3DInitDepthMapImpl::GetDepthNormalMap(G3DDataSet * g3dt,const ImageInfo& image)
+{
+	/* 稀疏物方点云投影构二维三角网 */
+	CGAL::Delaunay delaunay;
+	//G3D::Point2f  thDepth = TriangulatePointsDelaunay(g3dt,&delaunay, image, m_g3dDepthData->points);
+	PGPUDTPARAMS  pInput = new GPUDTPARAMS;
+	PGPUDTOUTPUT pOutput = new GPUDTOUTPUT;
+	G3D::Mesh mesh;
+	G3D::Point2f  thDepth = GpuDelaunay2D(g3dt, image, m_g3dDepthData->points, pInput, pOutput, mesh);
+	m_g3dDepthData->ioData.dMin = thDepth.x*0.9f;
+	m_g3dDepthData->ioData.dMax = thDepth.y*1.1f;
+	/* 通过三角面光栅化内插计算粗略深度图 */
+	const cv::Size sizeRef(image.width, image.height);
+	cv::Mat_<G3DFloat>& depthMap = m_g3dDepthData->depthMap();
+	depthMap.create(sizeRef);
+	::memset(depthMap.data, 0, depthMap.step[0] * depthMap.rows);
+	cv::Mat_<cv::Vec3f>& normalMap = m_g3dDepthData->normalMap();
+	normalMap.create(sizeRef);
+	::memset(normalMap.data, 0, normalMap.step[0] * normalMap.rows);
+	const Camera& camera = image.cam;
+	for (int idx = 0; idx < mesh.faces.size(); idx ++)
+	{
+		Mesh::Face facet = mesh.faces[idx];
+		const Point3f& i0 { G3DFloat(mesh.vertices[idx].x), G3DFloat(mesh.vertices[idx].y), G3DFloat(mesh.vertices[idx].z) };
+		const Point3f& i1 { G3DFloat(mesh.vertices[idx].x), G3DFloat(mesh.vertices[idx].y), G3DFloat(mesh.vertices[idx].z) };
+		const Point3f& i2 { G3DFloat(mesh.vertices[idx].x), G3DFloat(mesh.vertices[idx].y), G3DFloat(mesh.vertices[idx].z) };
+		/* 通过三个顶点坐标计算其所在平面 */
+		const Point3f c0 = PointI2C(camera, i0);
+		const Point3f c1 = PointI2C(camera, i1);
+		const Point3f c2 = PointI2C(camera, i2);
+
+		const Point3f edge1(c1 - c0);
+		const Point3f edge2(c2 - c0);
+		const Point3f normal = Normalized(edge2.cross(edge1));
+		const Point3f normalPlane = normal * (1 / normal.dot(c0));
+		/* 三角形光栅化解算每个像元的深度值和法向量值 */
+		RasterizeTriangle((const Point2f&)i2, (const Point2f&)i1, (const Point2f&)i0, [&camera, &depthMap, &normalMap, &normal, &normalPlane](Point2i pt) {
+			if (!IsInside(depthMap, pt))
+				return;
+			double z = 1 / (normalPlane.dot(PointI2C(camera, Point2f{ (G3DFloat)pt.x ,(G3DFloat)pt.y })));
+			assert(z > 0);
+			depthMap(pt.y, pt.x) = z;
+			normalMap(pt.y, pt.x) = cv::Vec3f(normal.x, normal.y, normal.z);
+		});
+	}
+
+	//old code 注释 zcj20190412
+
+	////const std::string cloudSavePath = "D:\\testData\\des_TriangulatePoints.ply";
+	////G3DTriMesh tri;
+	////Mesh mesh;
+	////tri.base = &mesh;
+	////uint32_t index=-1;
+	//for (CGAL::Delaunay::Face_iterator it = delaunay.faces_begin(); it != delaunay.faces_end(); ++it)
+	//{
+	//	//index++;
+	//	const CGAL::Delaunay::Face& face = *it;
+	//	//G3DFloat aa = face.vertex(0)->point().x();
+	//	const Point3f i0{ (G3DFloat)face.vertex(0)->point().x(),(G3DFloat)face.vertex(0)->point().y(),(G3DFloat)face.vertex(0)->point().z() };
+	//	const Point3f i1{ (G3DFloat)face.vertex(1)->point().x(),(G3DFloat)face.vertex(1)->point().y(),(G3DFloat)face.vertex(1)->point().z() };
+	//	const Point3f i2{ (G3DFloat)face.vertex(2)->point().x(),(G3DFloat)face.vertex(2)->point().y(),(G3DFloat)face.vertex(2)->point().z() };
+
+	//	//uint32_t ptIdx1 = index * 3 + 0;
+	//	//uint32_t ptIdx2 = index * 3 + 1;
+	//	//uint32_t ptIdx3 = index * 3 + 2;
+
+	//	//tri.base->vertices.push_back(i0);
+	//	//tri.base->vertices.push_back(i1);
+	//	//tri.base->vertices.push_back(i2);
+	//	//tri.base->faces.push_back(Mesh::Face{ ptIdx1 ,ptIdx2 ,ptIdx3 });
+	//	
+	//	/* 通过三个顶点坐标计算其所在平面 */
+	//	const Point3f c0 = PointI2C(camera, i0);
+	//	const Point3f c1 = PointI2C(camera, i1);
+	//	const Point3f c2 = PointI2C(camera, i2);
+
+	//	const Point3f edge1(c1 - c0);
+	//	const Point3f edge2(c2 - c0);
+	//	const Point3f normal = Normalized(edge2.cross(edge1));
+	//	const Point3f normalPlane = normal * (1 / normal.dot(c0));
+	//	/* 三角形光栅化解算每个像元的深度值和法向量值 */
+	//	RasterizeTriangle((const Point2f&)i2, (const Point2f&)i1, (const Point2f&)i0, [&camera, &depthMap, &normalMap, &normal, &normalPlane](Point2i pt) {
+	//		if (!IsInside(depthMap, pt))
+	//			return;
+	//		double z = 1 / (normalPlane.dot(PointI2C(camera, Point2f{ (G3DFloat)pt.x ,(G3DFloat)pt.y })));
+	//		assert(z > 0);
+	//		depthMap(pt.y, pt.x) = z;
+	//		normalMap(pt.y, pt.x) = cv::Vec3f(normal.x, normal.y, normal.z);
+	//	});
+	//}
+	////G3D::G3DMeshIO::ExportG3DMesh(tri, cloudSavePath);
+}
+
+
+/**
+*@brief 初始化深度图、法向量图好人可信度图(入口函数)
+*/
+bool G3DInitDepthMapImpl::InitDepthMap(G3DDataSet * g3dt, int idx, const std::string& savePath, DenseRunParam& runParam)
+{
+	m_runPars = runParam;
+	/* 单张影像信息 */
+	//const ImageInfo& image = g3dt->images[idx];
+	//if (image.name == "")
+	//	return false;
+	/* 点云信息 */  /*开销太大  注释*/
+	//PointCloud pointCloud = g3dt->pointCloud;
+
+	if (boost::filesystem::exists(savePath + G3D::G3D_DMAP_ROUGH_SUFFIX)) return true;
+	const std::string path = savePath + G3D::G3D_DMAP_ROUGH_SUFFIX;
+	if (g3dt->images[idx].neighbors.size() == 0)return false;
+
+	LogI("生成初始深度图: %s\n", path.c_str());
+
+	/* 初始化DepthData */
+	m_g3DepthMap = new G3DepthMap(g3dt, idx);
+	m_g3DepthMap->initViews();
+	const ImageInfo& image = g3dt->images[idx];
+	//const ImageInfo& image = m_g3DepthMap->depthData()->ViewDataArr[0].g3dImage.baseInfo;
+	//G3DepthData* depthData = m_g3DepthMap->depthData();
+	m_g3dDepthData = m_g3DepthMap->depthData();
+	/* 初始化得分取值位数 */
+	m_idxScore = (m_g3dDepthData->ViewDataArr.size() - 1) / 3;
+
+	/* 通过三角面光栅化内插计算初始深度图&法向量图*/
+	GetDepthNormalMap(g3dt,image);
+
+	/* 初始化可信度图 */
+	const cv::Size sizeRef(image.width, image.height);
+	cv::Mat_<G3DFloat>& confMap = m_g3dDepthData->confMap();
+	confMap.create(sizeRef);
+	::memset(confMap.data, 0, confMap.step[0] * confMap.rows);
+	//m_g3dDepthData = *depthData;
+	InitConfMap(confMap, image);
+	
+	//多线程IO管理
+	//if (!image.name.empty())
+	//	G3DResourceMan::instance()->saveDepthData(image.name, depthData->ioData);
+
+	//导出中间成果文件
+	//depthData->save(path);
+	m_g3DepthMap->save(path, G3D::DepthMapInited);
+
+	//m_g3DepthMap->exportPointCloud(savePath + "_rough.ply", m_g3dDepthData->ViewDataArr[0].g3dImage, m_g3dDepthData->depthMap(), m_g3dDepthData->normalMap());
+	LogI("生成初始深度图完成: %s\n", path.c_str());
+	return true;
+}
+
+
+
+///**
+//*@brief 初始化深度图、法向量图好人可信度图
+//*/
+//	bool G3DInitDepthMapImpl::initDepthMap(G3DDataSet * g3dt, int idx, const std::string& savePath, G3DInitDepthMap::Params& runParam)
+//	{
+//		m_runPars = runParam;
+//
+//		if (boost::filesystem::exists(savePath + G3D::G3D_DMAP_ROUGH_SUFFIX)) return true;
+//		const std::string path = savePath + G3D::G3D_DMAP_ROUGH_SUFFIX;
+//		if (g3dt->images[idx].neighbors.size() == 0)return false;
+//		
+//		logI("生成初始深度图: %s\n", path.c_str());
+//
+//		/* 初始化DepthData */
+//		m_gwDataSet = g3dt;
+//		m_g3DepthMap = new G3DepthMap(m_gwDataSet, idx);
+//		m_g3DepthMap->initViews();
+//		G3DepthData* depthData = m_g3DepthMap->depthData();
+//		m_idxScore = (depthData->ViewDataArr.size() - 1) / 3;
+//
+//		/* 稀疏物方点云投影构二维三角网 */
+//		CGAL::Delaunay delaunay;
+//		G3D::Point2f  thDepth = triangulatePointsDelaunay(&delaunay, *&g3dt, g3dt->images[idx], depthData->points);
+//		depthData->dMin = thDepth.x*0.9f;
+//		depthData->dMax = thDepth.y*1.1f;
+//
+//		const ImageInfo& image = g3dt->images[idx];
+//		if (image.name == "")
+//			return false;
+//		/* 通过三角面光栅化内插计算粗略深度图 */
+//		const cv::Size sizeRef(image.width, image.height);
+//
+//		cv::Mat_<G3DFloat>& depthMap = depthData->depthMap;
+//		depthMap.create(sizeRef);
+//		::memset(depthMap.data, 0, depthMap.step[0] * depthMap.rows);
+//		cv::Mat_<cv::Vec3f>& normalMap = depthData->normalMap;
+//		normalMap.create(sizeRef);
+//		::memset(normalMap.data, 0, normalMap.step[0] * normalMap.rows);
+//		cv::Mat_<G3DFloat>& confMap = depthData->confMap;
+//		confMap.create(sizeRef);
+//		::memset(confMap.data, 0, confMap.step[0] * confMap.rows);
+//
+//		const Camera& camera = image.cam;
+//		for (CGAL::Delaunay::Face_iterator it = delaunay.faces_begin(); it != delaunay.faces_end(); ++it)
+//		{
+//			const CGAL::Delaunay::Face& face = *it;
+//			G3DFloat aa = face.vertex(0)->point().x();
+//			const Point3f i0{ (G3DFloat)face.vertex(0)->point().x(),(G3DFloat)face.vertex(0)->point().y(),(G3DFloat)face.vertex(0)->point().z() };
+//			const Point3f i1{ (G3DFloat)face.vertex(1)->point().x(),(G3DFloat)face.vertex(1)->point().y(),(G3DFloat)face.vertex(1)->point().z() };
+//			const Point3f i2{ (G3DFloat)face.vertex(2)->point().x(),(G3DFloat)face.vertex(2)->point().y(),(G3DFloat)face.vertex(2)->point().z() };
+//			/* 通过三个顶点坐标计算其所在平面 */
+//			const Point3f c0 = pointI2C(camera, i0);
+//			const Point3f c1 = pointI2C(camera, i1);
+//			const Point3f c2 = pointI2C(camera, i2);
+//
+//			const Point3f edge1(c1 - c0);
+//			const Point3f edge2(c2 - c0);
+//			const Point3f normal = normalized(edge2.cross(edge1));
+//			const Point3f normalPlane = normal * (1 / normal.dot(c0));
+//			/* 三角形光栅化解算每个像元的深度值和法向量值 */
+//			rasterizeTriangle((const Point2f&)i2, (const Point2f&)i1, (const Point2f&)i0, [&camera, &depthMap, &normalMap, &normal, &normalPlane](Point2i pt) {
+//				if (!isInside(depthMap, pt))
+//					return;
+//				double z = 1 / (normalPlane.dot(pointI2C(camera, Point2f{ (G3DFloat)pt.x ,(G3DFloat)pt.y })));
+//				assert(z > 0);
+//				depthMap(pt.y, pt.x) = z;
+//				normalMap(pt.y, pt.x) = cv::Vec3f(normal.x, normal.y, normal.z);
+//			});
+//		}
+//
+//		initConfMap(confMap, image, *depthData);
+//		//m_g3dDepthData.save(path);
+//		//m_g3dDepthData.save(path);
+//		depthData->save(path);
+//		//m_g3DepthMap->exportPointCloud(savePath + "_rough.ply", depthData->ViewDataArr[0].g3dImage, depthData->depthMap, depthData->normalMap);
+//		logI("生成初始深度图完成: %s\n", path.c_str());
+//		return true;
+//	}
+
+}
+
