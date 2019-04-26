@@ -1,0 +1,13 @@
+regisiter：
+for (int i = 0; i < size; ++i)
+{
+      sum += array[i];
+}
+如果sum不写在核函数里，而是在内存里，那么这个sum就要写size次，而如果当做局部变量，只是把最终结果写回到内存，则只进行一次读写，quickly！
+int sum=0；
+for (int i = 0; i < size; ++i)
+      sum += array[i];
+memSum=sum；//memSum是全局内存上的sum，只把最终结果写上去。把寄存器当做临时结果的存储。
+
+Shared memory
+https://blog.csdn.net/NYG8945/article/details/52874225?utm_source=blogxgwz3
