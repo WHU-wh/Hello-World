@@ -1,2 +1,30 @@
 https://www.cnblogs.com/luolizhi/p/5746775.html  C++中cin、cin.get()、cin.getline()、getline()、gets()等函数的用法
 std::getline()方法是string头文件中的，是属于sstream。
+
+//自己写的方法，测过
+std::ifstream fin("C:/ptx.txt");
+	if (fin.fail()) {
+		printf("打开ptx文件失败");
+		return 0;
+	}
+
+	std::string curStr;
+	std::vector<std::string> vec;
+	while (std::getline(fin, curStr))
+	{
+		curStr = curStr + "\\n\"";
+		std::cout << "\n" << curStr;
+		vec.push_back(curStr);
+	}
+	fin.close();//用完关闭
+
+	std::ofstream fout("D:/newPtx.txt");
+	if (fout.fail()) {
+		printf("生成newPtx文件失败");
+		return 0;
+	}
+	for (int i = 0; i < vec.size(); i++)
+	{
+		fout << vec[i] << std::endl;
+	}
+	fout.close();
