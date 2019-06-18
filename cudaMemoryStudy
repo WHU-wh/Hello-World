@@ -11,3 +11,6 @@ memSum=sum；//memSum是全局内存上的sum，只把最终结果写上去。�
 
 Shared memory
 https://blog.csdn.net/NYG8945/article/details/52874225?utm_source=blogxgwz3
+
+cuda二维数组的创建与拷贝
+https://blog.csdn.net/yu132563/article/details/52658080
