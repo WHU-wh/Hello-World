@@ -1,0 +1,29 @@
+/**
+ *@brief 按公式x=fx*X/Z，y=fx*Y/Z的逆运算计算像点从像平面坐标系到对应物点在相机坐标系下的坐标，要先减去主点偏置x0、y0。
+ *将计算所得坐标归一化。
+ */
+template<class T>
+TPoint3<T> PointI2C(const Camera& camera, const TPoint2<T>& ip)
+{
+	auto& K = camera.K;
+	TPoint3<T> res;
+	res[0] =  static_cast<T>((ip.x - K[2])   / K[0]);
+	res[1] =  static_cast<T>((ip.y - K[5])  / K[4]);
+	res[2] = 1;
+	return res;
+}
+
+/**
+ *@brief 按公式x=fx*X/Z，y=fx*Y/Z的逆运算计算像点从像平面坐标系到对应物点在相机坐标系下的坐标，要先减去主点偏置x0、y0。
+ *将计算所得坐标乘以像点深度，不做归一化处理。
+ */
+template<class T>
+TPoint3<T> PointI2C(const Camera& camera, const TPoint3<T>& ip)
+{
+	auto& K = camera.K;
+	TPoint3<T> res;
+	res[0] = static_cast<T>((ip.x - K[2]) * ip.z / K[0]);
+	res[1] = static_cast<T>((ip.y - K[5]) * ip.z / K[4]);
+	res[2] = static_cast<T>(ip.z);
+	return res;
+}
