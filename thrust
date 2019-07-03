@@ -1,0 +1,98 @@
+// thrust按key叠加val，key可以是结构体或者val可以是结构体，两者都是应该也可以，但是要在结构内自己重载< 或重载加号
+//
+
+#include "pch.h"
+#include <thrust/host_vector.h>
+#include <thrust/sort.h>
+#include <thrust/reduce.h>
+#include <thrust/merge.h>
+
+struct val
+{
+	float x;
+	float y;
+	float z;
+
+	val __host__ __device__ operator+(const val& right)const {
+		return{ this->x + right.x,this->y + right.y ,this->z + right.z };
+	}
+};
+
+int main()
+{
+	/*std::cout << "Hello World!\n";
+
+	int key[20];
+	for (int i = 0; i < 20; i++) {
+		key[i] = i%3;
+	}
+
+	val valArr[20];
+	for (int i = 0; i < 20; i++) {
+		valArr[i] = { float(i%3),float(i % 3),float(i % 3) };
+	}
+
+	thrust::sort_by_key(key, key + 20, valArr);
+
+	for (int i = 0; i < 20; i++)
+	{
+		std::cout << key[i] << "\n";
+	}*/
+	//system("pause");
+
+	//int resKey[20];
+	//int resVal[20];
+
+	//int valArr2[20];
+	//for (int i = 0; i < 20; i++)
+	//{
+	//	valArr2[i] = 1;
+	//}
+	////thrust::reduce_by_key(key, key + 20, valArr2, resRuduKey, resRuduVal);
+	//thrust::reduce_by_key(key, key + 20, valArr2, resKey, resVal);
+
+
+
+	struct val
+	{
+		float x;
+		float y;
+		float z;
+
+    //重载加号，否则val不能叠加
+		val __host__ __device__ operator+(const val& right)const {
+			return{ this->x + right.x,this->y + right.y ,this->z + right.z };
+		}
+	};
+
+	const int N = 7;
+	int A[N] = { 1, 3, 3, 3, 2, 2, 1 }; // input keys
+	val B[N];
+	for (int i = 0; i < N; i++)  //input vals
+	{
+		B[i] = { float(i), float(i), float(i) };
+	}
+
+	int C[N]; // output keys
+	val D[N]; // output values
+	
+	//需要4个数组作为参数，原数据Key数组，源数据Val数组，结果Key数组，结果Val数组
+	thrust::reduce_by_key(A, A + N, B, C, D);
+
+	//问题：key和val要组织到各自的数组，不能整合成一个结构体，
+
+	std::cout << "ResKey:\n";
+	for (int i = 0; i < 4; i++)
+	{
+		std::cout << C[i] << "\n";
+	}
+
+	std::cout << "ResVal:\n";
+	for (int i = 0; i < 4; i++)
+	{
+		printf("%f %f %f\n", D[i].x, D[i].y, D[i].z);
+	}
+
+	return 0;
+
+}
