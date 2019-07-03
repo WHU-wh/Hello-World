@@ -1,0 +1,1206 @@
+#include "cuda_runtime.h"
+#include "device_launch_parameters.h"
+#include "CUDARefineMesh.cuh"
+#include <device_atomic_functions.h>
+#include <thrust/device_vector.h>
+#include <G3D/G3DVecCUDA.h>
+#include "G3DRefineMeshCUDAImpl.h"
+#include "opencv2/cudaarithm.hpp"
+#include "sharedmem.h"
+//#include <boost/timer.hpp>
+namespace G3D
+{
+	static void HandleError(cudaError err, const char *file, int line)
+	{
+		if (err != cudaSuccess) {
+			printf("%s in %s at line %d\n", cudaGetErrorString(err), file, line);
+			exit(EXIT_FAILURE);
+		}
+	}
+#define HANDLE_ERROR(err) (HandleError(err, __FILE__, __LINE__))
+
+	/**
+	*@brief  点类型转换函数，将一种数据类型的点转换成另一中数据类型的点。
+	*@param[in]  pt  数据类型1的点
+	*@return    数据类型2的点
+	*/
+	template <typename FLT1, typename FLT2>
+	inline __device__ TPoint3<FLT1> Cast(const TPoint3<FLT2>& pt) {
+		TPoint3<FLT1> res;
+		res[0] = (FLT1)pt[0];
+		res[1] = (FLT1)pt[1];
+		res[2] = (FLT1)pt[2];
+		return res;
+	}
+
+	template <typename T>
+	inline __device__ T Norm(const TPoint3<T>& v)
+	{
+		return sqrt(pow((T)v.x, 2) + pow((T)v.y, 2) + pow((T)v.z, 2));
+	}
+
+	template<class T>
+	__device__  TPoint3<T> DevicePointI2C(const Camera* camera, const TPoint2<T>& ip)
+	{
+		auto& K = camera->K;
+		TPoint3<T> res;
+		res.x = (ip.x - K[2]) / K[0];
+		res.y = (ip.y - K[5]) / K[4];
+		res.z = 1;
+		return res;
+	}
+
+	template<class T1, class T2 = float>
+	__device__  TPoint3<T2> DeviceRayPoint(const Camera* camera, const TPoint2<T1>& x)
+	{
+		auto& R = camera->R;
+		auto cPt = DevicePointI2C(camera, Point2f{ (float)((T1*)&x)[0], (float)((T1*)&x)[1] });
+		TPoint3<T2> resPt;
+		((T2*)&resPt)[0] = R[0] * cPt.x + R[3] * cPt.y + R[6] * cPt.z;
+		((T2*)&resPt)[1] = R[1] * cPt.x + R[4] * cPt.y + R[7] * cPt.z;
+		((T2*)&resPt)[2] = R[2] * cPt.x + R[5] * cPt.y + R[8] * cPt.z;
+		return resPt;
+	}
+
+	template<class T>
+	__device__  TPoint3<T> DeviceNormalized(const TPoint3<T>& pt3)
+	{
+		double ptd[3] = { pt3.x, pt3.y, pt3.z };
+		double len = std::sqrt(ptd[0] * ptd[0] + ptd[1] * ptd[1] + ptd[2] * ptd[2]);
+		TPoint3<T> pt;
+		pt.x = pt3.x / len;
+		pt.y = pt3.y / len;
+		pt.z = pt3.z / len;
+		return pt;
+	}
+	__device__ bool DeviceIsFinite(double x)
+	{
+		return (!isinf(x) && !isnan(x));
+	}
+
+	template <typename TP, typename TX, typename T, typename TJ>
+	__device__  T DeviceProjectVertex(const TP* P, const TX* X, T* x, TJ* jacobian)
+	{
+		const TX&  x1(X[0]);
+		const TX&  x2(X[1]);
+		const TX&  x3(X[2]);
+
+		const TP& p1_1(P[0]);
+		const TP& p1_2(P[1]);
+		const TP& p1_3(P[2]);
+		const TP& p1_4(P[3]);
+		const TP& p2_1(P[4]);
+		const TP& p2_2(P[5]);
+		const TP& p2_3(P[6]);
+		const TP& p2_4(P[7]);
+		const TP& p3_1(P[8]);
+		const TP& p3_2(P[9]);
+		const TP& p3_3(P[10]);
+		const TP& p3_4(P[11]);
+
+		const TP t5(p3_4 + p3_1 * x1 + p3_2 * x2 + p3_3 * x3);
+		const TP t6(1.0 / t5);
+		const TP t10(p1_4 + p1_1 * x1 + p1_2 * x2 + p1_3 * x3);
+		const TP t11(t10*t6);
+		const TP t15(p2_4 + p2_1 * x1 + p2_2 * x2 + p2_3 * x3);
+		const TP t16(t15*t6);
+		x[0] = T(t11);
+		x[1] = T(t16);
+		if (jacobian) {
+			jacobian[0] = TJ((p1_1 - p3_1 * t11) * t6);
+			jacobian[1] = TJ((p1_2 - p3_2 * t11) * t6);
+			jacobian[2] = TJ((p1_3 - p3_3 * t11) * t6);
+			jacobian[3] = TJ((p2_1 - p3_1 * t16) * t6);
+			jacobian[4] = TJ((p2_2 - p3_2 * t16) * t6);
+			jacobian[5] = TJ((p2_3 - p3_3 * t16) * t6);
+		}
+		return T(t5);
+	}
+
+	__device__  Point2f DeviceImageLinearSimple(const cv::cuda::PtrStepSz<cv::Vec2f>& image, const Point2f& iPt)
+	{
+		int X1 = iPt.x;
+		int Y1 = iPt.y;
+		int X2 = X1 + 1;
+		int Y2 = Y1 + 1;
+
+		if (X2 >= image.cols || Y2 >= image.rows) {
+			Point2f pt2f;
+			pt2f.x = image(Y1, X1).val[0];
+			pt2f.y = image(Y1, X1).val[1];
+			return pt2f;
+		}
+
+		double frac = iPt.x - X1;
+		Point2f val11;
+		val11.x = image(Y1, X1).val[0];
+		val11.y = image(Y1, X1).val[1];
+		Point2f val12;
+		val12.x = image(Y1, X2).val[0];
+		val12.y = image(Y1, X2).val[1];
+		Point2f val21;
+		val21.x = image(Y2, X1).val[0];
+		val21.y = image(Y2, X1).val[1];
+		Point2f val22;
+		val22.x = image(Y2, X2).val[0];
+		val22.y = image(Y2, X2).val[1];
+
+		Point2f temp1;
+		temp1.x = val11.x * (1 - frac) + val12.x * frac;
+		temp1.y = val11.y * (1 - frac) + val12.y * frac;
+		Point2f temp2;
+		temp2.x = val21.x * (1 - frac) + val22.x * frac;
+		temp2.y = val21.y * (1 - frac) + val22.y * frac;
+
+		frac = iPt.y - Y1;
+		Point2f vec2f;
+		vec2f.x = temp1.x * (1 - frac) + temp2.x * frac;
+		vec2f.y = temp1.y * (1 - frac) + temp2.y * frac;
+
+		return vec2f;
+	}
+
+
+#pragma region ZNCC&DZNCC&PhotometricGradient
+	__global__
+		void kernalComputeDZNCCGradient(
+			ComputeParams* params,
+			cv::cuda::PtrStepSz<uchar> mask,
+			cv::cuda::PtrStepSz<G3DFloat> varA,
+			cv::cuda::PtrStepSz<G3DFloat> varAB,
+			cv::cuda::PtrStepSz<G3DFloat> meanA,
+			cv::cuda::PtrStepSz<G3DFloat> meanAB,
+			cv::cuda::PtrStepSz<G3DFloat> AABSum,
+			cv::cuda::PtrStepSz<G3DFloat> imgA,
+			cv::cuda::PtrStepSz<G3DFloat> imgAB,
+			Mesh::Face* faces,
+			Mesh::Normal* normals,
+			cv::cuda::PtrStepSz<G3DFloat> depthMapA,
+			cv::cuda::PtrStepSz<int> faceMapA,
+			cv::cuda::PtrStepSz<cv::Vec3f> baryMapA,
+			Camera* cameraA,
+			Camera* cameraB,
+			cv::cuda::PtrStepSz<cv::Vec2f> imageGradB,
+			Point3f* photoGrad,
+			G3DIdx* photoGradNorm)
+	{
+		int idx = blockIdx.x * blockDim.x + threadIdx.x;
+		int idy = threadIdx.y;
+		int id = gridDim.x * blockDim.x * idy + idx;
+		if (id >= (mask.cols - 2 * params->halfSize) * (mask.rows - 2 * params->halfSize))
+			return;
+
+		//根据线程id计算对应的像素位置
+		int roiWidth = mask.cols - 2 * params->halfSize;
+		int r = id / roiWidth;
+		int c = id % roiWidth;
+		r += params->halfSize;
+		c += params->halfSize;
+
+		if (!mask(r, c))
+			return;
+
+		const G3DFloat cv = (G3DFloat)((
+			AABSum(r + params->halfSize + 1, c + params->halfSize + 1) -
+			AABSum(r + params->halfSize + 1, c - params->halfSize) -
+			AABSum(r - params->halfSize, c + params->halfSize + 1) +
+			AABSum(r - params->halfSize, c - params->halfSize)) * (1.0 / (double)params->n));
+
+		G3DFloat imgVarA = varA(r, c);
+		G3DFloat imgVarAB = varAB(r, c);
+
+		const G3DFloat invSqrtVAVB(G3DFloat(1) / sqrt(varA(r, c)*varAB(r, c)));
+
+		G3DFloat imgMeanA = meanA(r, c);
+		G3DFloat imgMeanAB = meanAB(r, c);
+
+		G3DFloat ZNCC = (cv - meanA(r, c)*meanAB(r, c)) * invSqrtVAVB;
+
+		const G3DFloat ZNCCinvVB = ZNCC / varAB(r, c);
+		const G3DFloat dZNCC((G3DFloat)imgA(r, c)*invSqrtVAVB - (G3DFloat)imgAB(r, c)*ZNCCinvVB +
+			meanAB(r, c)*ZNCCinvVB - meanA(r, c)*invSqrtVAVB);
+		const G3DFloat minVAVB(fmin(varA(r, c), varAB(r, c)));
+		const G3DFloat ReliabilityFactor(minVAVB / (minVAVB + G3DFloat(0.0015)));
+		float DZNCC = -ReliabilityFactor * dZNCC;
+
+		//float eof = (float)(ReliabilityFactor*(G3DFloat(1) - ZNCC));
+		//atomicAdd(&params->score, eof);
+
+		const auto idxFace(faceMapA(r, c));
+		const Point3f N(normals[idxFace]);
+
+		const auto rayA = DeviceRayPoint(cameraA, Point2i{ c, r });
+		const auto dA = DeviceNormalized(rayA);
+		const G3DFloat Nd(N.x * dA.x + N.y * dA.y + N.z * dA.z);
+		float degree = acos(Nd) * 180 / 3.14159265358979323846;
+
+		if (Nd > -0.1) /* -0.1 acos值为95-96度之间 */
+			return;
+
+		const G3DFloat depthA(depthMapA(r, c));
+		Point3d X;
+		X.x = rayA.x * G3Double(depthA) + cameraA->C[0];
+		X.y = rayA.y * G3Double(depthA) + cameraA->C[1];
+		X.z = rayA.z * G3Double(depthA) + cameraA->C[2];
+
+		float inXJac[6] = { 0 };
+		cv::cuda::PtrStepSz<G3DFloat> xJac(2, 3, inXJac, sizeof(G3DFloat) * 3);
+		Point2f xB;
+		const float depthB(DeviceProjectVertex((double*)(&cameraB->P), (double*)&X, (float*)&xB, inXJac));
+		Point2f tmpGrad = DeviceImageLinearSimple(imageGradB, xB);
+
+		G3DFloat xJacMdA[2] = { 0 };
+		xJacMdA[0] = xJac(0, 0) * dA.x + xJac(0, 1) * dA.y + xJac(0, 2) * dA.z;
+		xJacMdA[1] = xJac(1, 0) * dA.x + xJac(1, 1) * dA.y + xJac(1, 2) * dA.z;
+		G3DFloat gBxJacMdA = tmpGrad.x * xJacMdA[0] + tmpGrad.y * xJacMdA[1];
+
+		G3DFloat mSg = (gBxJacMdA * DZNCC * params->regularizationScale / Nd);
+		const G3DFloat sg = mSg;
+
+		/* add gradient to the three vertices */
+		const Mesh::Face& face(faces[idxFace]);
+		const cv::Vec3f& b(baryMapA(r, c));
+		for (int v = 0; v < 3; ++v) {
+			//const auto g(N*(sg*(G3DFloat)b[v]));
+			Point3f g;
+			g.x = N.x * (sg * b.val[v]);
+			g.y = N.y * (sg * b.val[v]);
+			g.z = N.z * (sg * b.val[v]);
+
+			const auto idxVert(((Mesh::VIndex*)&face)[v]);
+			atomicAdd(&photoGrad[idxVert].x, g.x);
+			atomicAdd(&photoGrad[idxVert].y, g.y);
+			atomicAdd(&photoGrad[idxVert].z, g.z);
+			atomicAdd(&photoGradNorm[idxVert], 1);
+		}
+	}
+
+	void RunKernalComputeDZNCCGradient(
+		int size,
+		ComputeParams* params,
+		cv::cuda::GpuMat& mask,
+		cv::cuda::GpuMat& varA,
+		cv::cuda::GpuMat& varAB,
+		cv::cuda::GpuMat& meanA,
+		cv::cuda::GpuMat& meanAB,
+		cv::cuda::GpuMat& AABSum,
+		cv::cuda::GpuMat& imgA,
+		cv::cuda::GpuMat& imgAB,
+		Mesh::Face* faces,
+		Mesh::Normal* normals,
+		cv::cuda::GpuMat& depthMapA,
+		cv::cuda::GpuMat& faceMapA,
+		cv::cuda::GpuMat& baryMapA,
+		Camera* camA,
+		Camera* camB,
+		cv::cuda::GpuMat& gradB,
+		Point3f* photoGrad,
+		G3DIdx* photoGradNorm)
+	{
+		dim3 threadsPerBlock(32, 16);
+		int blockNum = (size + 32 * 16 - 1) / (32 * 16);
+		kernalComputeDZNCCGradient << <blockNum, threadsPerBlock >> > (params, mask, varA, varAB, meanA, meanAB, AABSum, imgA, imgAB, faces, normals, depthMapA, faceMapA, baryMapA,
+			camA, camB, gradB, photoGrad, photoGradNorm);
+	}
+
+	extern "C" void cudaComputeDZNCCGradient(
+		cv::cuda::GpuMat& gpuImgA,
+		cv::cuda::GpuMat& gpuMeanA,
+		cv::cuda::GpuMat& gpuVarA,
+		cv::cuda::GpuMat& gpuImgAB,
+		cv::cuda::GpuMat& gpuMeanAB,
+		cv::cuda::GpuMat& gpuVarAB,
+		cv::cuda::GpuMat& gpuMask,
+		Mesh::Face* gpuFaces,
+		Mesh::Normal* gpuNormals,
+		cv::cuda::GpuMat& gpuDMapA,
+		cv::cuda::GpuMat& gpuFaceMapA,
+		cv::cuda::GpuMat& gpuBaryMapA,
+		Camera* gpuCameraA,
+		Camera* gpuCameraB,
+		cv::cuda::GpuMat& gpuGradB,
+		Point3f* gpuPhotoGrad,
+		G3DIdx* gpuPhotoGradNorm,
+		G3DFloat RegularizationScale,
+		const int halfSize,
+		float& score)
+	{
+		const int n(pow(halfSize * 2 + 1, 2));
+
+		GpuMat gpuImgAAB;
+		cv::cuda::multiply(gpuImgA, gpuImgAB, gpuImgAAB);
+
+		cv::cuda::GpuMat gpuAABSum(gpuImgAAB.rows + 1, gpuImgAAB.cols + 1, CV_32FC1, cv::Scalar(0));
+		//20190624 pengzhe
+		//CUDAIntegral(gpuImgAAB, gpuAABSum);
+		//CUDAIntegralPZ(gpuImgAAB, gpuAABSum);
+		ComputeParams params(halfSize, n);
+		params.score = 0;
+		params.regularizationScale = RegularizationScale;
+		ComputeParams* gpuParams = 0;
+		HANDLE_ERROR(cudaMalloc(&gpuParams, sizeof(ComputeParams)));
+		HANDLE_ERROR(cudaMemcpy(gpuParams, &params, sizeof(ComputeParams), cudaMemcpyHostToDevice));
+
+		int size = (gpuMask.rows - 2 * halfSize) * (gpuMask.cols - 2 * halfSize);
+		RunKernalComputeDZNCCGradient(size, gpuParams, gpuMask, gpuVarA, gpuVarAB, gpuMeanA, gpuMeanAB, gpuAABSum, gpuImgA, gpuImgAB, gpuFaces, gpuNormals, gpuDMapA, gpuFaceMapA, gpuBaryMapA, gpuCameraA, gpuCameraB, gpuGradB, gpuPhotoGrad, gpuPhotoGradNorm);
+		//HANDLE_ERROR(cudaDeviceSynchronize());
+
+		HANDLE_ERROR(cudaMemcpy(&params, gpuParams, sizeof(ComputeParams), cudaMemcpyDeviceToHost));
+		score = params.score;
+		HANDLE_ERROR(cudaFree(gpuParams));
+	}
+
+	const int sMemWidth = 22;
+	const int blockWidth = 16;
+	//modify_0702_YinHaiYaYuan
+	__device__ void CalcMeanVarDZNCC(float** imgA, float ** imgB, int thrIdX, int thrIdY, int halfWindow, float & zncc)
+	{
+		float integAxB = 0;
+		float integA = 0;
+		float integB = 0;
+		float integA2 = 0;
+		float integB2 = 0;
+
+		for (int i = thrIdX - 3; i < thrIdX + 3; i++)
+		{
+			for (int j = thrIdY - 3; j > thrIdY + 3; j++)
+			{
+				integAxB += imgA[i][j] * imgB[i][j];
+				integA += imgA[i][j];
+				integB += imgB[i][j];
+				integA2 += imgA[i][j] * imgA[i][j];
+				integB2 += imgB[i][j] * imgB[i][j];
+			}
+		}
+
+		int pixelNum = (halfWindow * 2 + 1)*(halfWindow * 2 + 1);
+		float meanA = integA / pixelNum;
+		float meanB = integB / pixelNum;
+		float varA = integA2 - pixelNum * powf(meanA, 2);
+		float varB = integB2 - pixelNum * powf(meanB, 2);
+		int varAxVarb = (pixelNum* integA2 - powf(integA, 2))* (pixelNum* integB2 - powf(integB, 2));
+		zncc = (pixelNum* integAxB - integA * integB) / sqrtf(varAxVarb);
+
+		float invSqrtVAVB(1.0 / sqrt(varA*varB));
+		float ZNCCinvVB = zncc / varB;
+		float dZNCC(imgA[thrIdX][ thrIdY]* invSqrtVAVB - 
+			                 imgB[thrIdX][ thrIdY] * ZNCCinvVB +
+			                 meanB *ZNCCinvVB -
+			                 meanA *invSqrtVAVB);
+
+		float minVAVB(fmin(varA, varB));
+		float DZNCC = -(minVAVB / (minVAVB + float(0.0015))) * dZNCC;
+	}
+
+	//modify_0702_YinHaiYaYuan
+	__global__ void  KernelComputeDZNCCGradient(
+		cv::cuda::PtrStepSz<G3DFloat> imgA,
+		cv::cuda::PtrStepSz<G3DFloat> imgB,
+		cv::cuda::PtrStepSz<G3DFloat> depthMapA,
+		cv::cuda::PtrStepSz<int> faceMapA,
+		cv::cuda::PtrStepSz<cv::Vec3f> baryMapA,
+		Camera* gpuCameraA,
+		Camera* gpuCameraB,
+		G3DFloat RegularizationScale,
+		int halfWindow)
+	{
+		__shared__ float s1[sMemWidth][sMemWidth];
+		__shared__ float s2[sMemWidth][sMemWidth];
+		__shared__ float s3[sMemWidth][sMemWidth];
+		__shared__ float sMemCam[24];
+
+		//step1 加载影像和相机参数到共享内存  
+		//加载影像A
+		int thrId = threadIdx.y*blockWidth + threadIdx.x;
+		int destY = thrId / sMemWidth; 
+		int destX = thrId % sMemWidth;
+		int srcX = blockIdx.x*blockWidth + destX- halfWindow;
+		int srcY = blockIdx.y*blockWidth + destY- halfWindow;
+		if (srcY >= 0 && srcY < imgA.rows && srcX >= 0 && srcX < imgA.cols)
+			s1[destY][destX] = imgA(srcX,srcY);
+		else 
+			s1[destY][destX] = 0;
+	
+		 thrId = threadIdx.y*blockWidth + threadIdx.x+ blockWidth* blockWidth;
+		 destY = thrId / sMemWidth; 
+		 destX = thrId % sMemWidth;
+		 srcX = blockIdx.x*blockWidth + destX - halfWindow;
+		 srcY = blockIdx.y*blockWidth + destY - halfWindow;
+		 if (destY < sMemWidth)
+		 {
+			 if (srcY >= 0 && srcY < imgA.rows && srcX >= 0 && srcX < imgA.cols)
+				 s1[destY][destX] = imgA(srcX, srcY);
+			 else
+				 s1[destY][destX] = 0;
+		 }
+		 //加载影像B
+		 thrId = threadIdx.y*blockWidth + threadIdx.x;
+		 destY = thrId / sMemWidth;
+		 destX = thrId % sMemWidth;
+		 srcX = blockIdx.x*blockWidth + destX - halfWindow;
+		 srcY = blockIdx.y*blockWidth + destY - halfWindow;
+		 if (srcY >= 0 && srcY < imgB.rows && srcX >= 0 && srcX < imgB.cols)
+			 s2[destY][destX] = imgB(srcX, srcY);
+		 else
+			 s2[destY][destX] = 0;
+
+		 thrId = threadIdx.y*blockWidth + threadIdx.x + blockWidth * blockWidth;
+		 destY = thrId / sMemWidth;
+		 destX = thrId % sMemWidth;
+		 srcX = blockIdx.x*blockWidth + destX - halfWindow;
+		 srcY = blockIdx.y*blockWidth + destY - halfWindow;
+		 if (destY < sMemWidth)
+		 {
+			 if (srcY >= 0 && srcY < imgB.rows && srcX >= 0 && srcX < imgB.cols)
+				 s2[destY][destX] = imgB(srcX, srcY);
+			 else
+				 s2[destY][destX] = 0;
+		 }
+		 __syncthreads();
+
+		 for (int i = 0; i < 9; i++){
+			 sMemCam[i]=gpuCameraA->K[i];
+		 }
+		 for (int j = 0; j < 3; j++) {
+			 sMemCam[9 + j] = gpuCameraA->C[j];
+		 }
+		 for(int k=0;k<12;k++){
+			 sMemCam[12 + k] = gpuCameraB->P[k];
+		 }
+
+		//step2 for循环计算该像素对应窗口内的均值方差和DZNCC。
+		float zncc;
+		CalcMeanVarDZNCC((float **)s1, (float **)s2, threadIdx.x+3, threadIdx.y+3, halfWindow, zncc);
+
+		//step3 由S2算影像B的梯度影像，结果存于S3中
+
+	}
+
+	//modify_0702_YinHaiYaYuan
+	extern "C"  void  CUDAComputeDZNCCGradientMod (
+		cv::cuda::GpuMat& gpuImgA,
+		cv::cuda::GpuMat& gpuImgAB,
+		Mesh::Face* faces,
+		Mesh::Normal* normals,
+		cv::cuda::GpuMat& depthMapA,
+		cv::cuda::GpuMat& faceMapA,
+		cv::cuda::GpuMat& baryMapA,
+		Camera* gpuCameraA,
+		Camera* gpuCameraB,
+		G3DFloat RegularizationScale,
+		const int halfSize)
+	{
+		int bWidth = 16;
+		int imgHeight = gpuImgA.rows;
+		int imgWidth = gpuImgA.cols;
+		int girdSizeX = (imgWidth + bWidth - 1) / bWidth;
+		int girdSizeY = (imgHeight + bWidth - 1) / bWidth;
+
+		dim3 dimGrid(girdSizeX, girdSizeY);
+		dim3 dimBlock(bWidth, bWidth);
+		//KernelComputeDZNCC<<<dimGrid,dimBlock>>>(   );
+	}
+#pragma endregion
+
+#pragma region 自定义cvIntergral
+	/*
+	根据原始影像并行计算每一行的积分值
+	*/
+	__global__ void KernalIntegralRow(cv::cuda::PtrStepSz<G3DFloat> image, cv::cuda::PtrStepSz<G3DFloat> integral)
+	{
+		int rows = image.rows;
+		int cols = image.cols;
+		int idx = blockIdx.x * blockDim.x + threadIdx.x;
+		int idy = threadIdx.y;
+		int id = gridDim.x * blockDim.x * idy + idx;
+		if (id >= rows)
+			return;
+
+		G3DFloat* rowData = image.ptr(id);
+		G3DFloat* integralData = integral.ptr(id + 1);
+
+		G3DFloat lastValue = 0;
+		for (int i = 0; i < cols; ++i) {
+			lastValue += rowData[i];
+			integralData[i + 1] = lastValue;
+			//integralData[i + 1] = integralData[i] + rowData[i];
+		}
+		/*
+		G3DFloat curValue = rowData[0];
+		for (int i = 1; i < cols; ++i) {
+			curValue += rowData[i];
+			integralData[i] = curValue;
+			//integral(i, id) = integral(i - 1, id) + integral(i, id);
+		}*/
+
+	}
+
+	/*
+	//根据行积分值按列计算每个像素的积分制
+	*/
+	__global__ void KernalIntegralCol(cv::cuda::PtrStepSz<G3DFloat> integral)
+	{
+		int rows = integral.rows;
+		int cols = integral.cols;
+		int idx = blockIdx.x * blockDim.x + threadIdx.x;
+		int idy = threadIdx.y;
+		int id = gridDim.x * blockDim.x * idy + idx;
+		if (id >= cols)
+			return;
+
+
+		G3DFloat curValue = integral(0, id);
+		for (int i = 1; i < rows; ++i) {
+			curValue += integral(i, id);
+			integral(i, id) = curValue;
+			//integral(i, id) = integral(i - 1, id) + integral(i, id);
+		}
+	}
+
+	extern "C"	void CUDAIntegral(cv::cuda::GpuMat& image, cv::cuda::GpuMat& integral)
+	{
+		int cols = image.cols;
+		int rows = image.rows;
+
+		dim3 tpb(32, 8);
+		int numRowBlocks = (rows + 32 * 8 - 1) / (32 * 8);
+		int numColBlocks = (cols + 32 * 8 - 1) / (32 * 8);
+		KernalIntegralRow << <numRowBlocks, tpb >> > (image, integral);
+		cudaDeviceSynchronize();
+		KernalIntegralCol << <numColBlocks, tpb >> > (integral);
+		cudaDeviceSynchronize();
+	}
+
+	// Texture source image
+	//texture<float, 1, cudaReadModeElementType> TexSrc;
+	//__global__ void KernalIntegralRowPZ(cv::cuda::PtrStepSz<G3DFloat> image, cv::cuda::PtrStepSz<G3DFloat> integral)
+	//{
+	//	int height = image.rows;
+	//	int width = image.cols;
+	//	int step = image.step;
+	//	int r = blockDim.x * blockIdx.x + threadIdx.x;
+	//	if (r >= height) return;
+
+	//	float rs = 0.f;
+	//	for (int c = 0; c < width; ++c)
+	//	{
+	//		rs += tex1Dfetch(TexSrc, r * step / 4 + c);
+	//		integral(r + 1, c + 1) = rs;
+	//	}
+	//}
+
+
+	//__global__ void KernalIntegralColPZ(cv::cuda::PtrStepSz<G3DFloat> integral)
+	//{
+	//	int height = integral.rows;
+	//	int width = integral.cols;
+	//	int step = integral.step;
+	//	int c = blockDim.x * blockIdx.x + threadIdx.x;
+	//	if (c >= width)
+	//		return;
+
+	//	float rs = integral(0, c);
+
+	//	for (int r = 1; r < height; r++)
+	//	{
+	//		rs += integral(r, c);
+	//		integral(r, c) = rs;
+	//	}
+	//}
+
+	//extern "C"	void CUDAIntegralPZ(cv::cuda::GpuMat& image, cv::cuda::GpuMat& integral)
+	//{
+	//	int cols = image.cols;
+	//	int rows = image.rows;
+	//	float* data = (float*)(image.data);
+	//	cudaBindTexture(0, TexSrc, data, rows * image.step);
+	//	for (int i = 0; i < 1e+07; ++i)
+	//		KernalIntegralRowPZ << < (rows + 31) / 32, 32 >> > (image, integral);
+	//	KernalIntegralColPZ << < (cols + 31) / 32, 32 >> > (integral);
+	//	cudaUnbindTexture(TexSrc);
+
+
+	//	//dim3 tpb(32, 8);
+	//	//int numRowBlocks = (rows + 32 * 8 - 1) / (32 * 8);
+	//	//int numColBlocks = (cols + 32 * 8 - 1) / (32 * 8);
+	//	//KernalIntegralRow << <numRowBlocks, tpb >> > (image, integral);
+	//	//cudaDeviceSynchronize();
+	//	//KernalIntegralCol << <numColBlocks, tpb >> > (integral);
+	//	//cudaDeviceSynchronize();
+	//}
+
+//	//20190630 pengzhe
+//	//////////////////////////////////////////////////////
+//// PrefixSum
+//// Efficient Integral Image Computation on the GPU
+//// Berkin Bilgic, Berthold K.P. Horn, Ichiro Masaki
+////////////////////////////////////////////////////////
+//
+//	inline __device__
+//		void PrefixSum(cv::cuda::PtrStepSz<G3DFloat> output, cv::cuda::PtrStepSz<G3DFloat> input, int w, int nextpow2)
+//	{
+//		SharedMemory<float> shared;
+//		float* temp = shared.getPointer();
+//
+//		const int tdx = threadIdx.x;
+//		int offset = 1;
+//		const int tdx2 = 2 * tdx;
+//		const int tdx2p = tdx2 + 1;
+//
+//		temp[tdx2] = tdx2 < w ? input[tdx2] : 0;
+//		temp[tdx2p] = tdx2p < w ? input[tdx2p] : 0;
+//
+//		for (int d = nextpow2 >> 1; d > 0; d >>= 1) {
+//			__syncthreads();
+//			if (tdx < d)
+//			{
+//				int ai = offset * (tdx2p)-1;
+//				int bi = offset * (tdx2 + 2) - 1;
+//				temp[bi] += temp[ai];
+//			}
+//			offset *= 2;
+//		}
+//
+//		if (tdx == 0) temp[nextpow2 - 1] = 0;
+//
+//		for (int d = 1; d < nextpow2; d *= 2) {
+//			offset >>= 1;
+//
+//			__syncthreads();
+//
+//			if (tdx < d)
+//			{
+//				int ai = offset * (tdx2p)-1;
+//				int bi = offset * (tdx2 + 2) - 1;
+//				Tout t = temp[ai];
+//				temp[ai] = temp[bi];
+//				temp[bi] += t;
+//			}
+//		}
+//
+//		__syncthreads();
+//
+//		if (tdx2 < w)  output[tdx2] = temp[tdx2];
+//		if (tdx2p < w) output[tdx2p] = temp[tdx2p];
+//	}
+//
+//	template<typename Tout, typename Tin>
+//	__global__ void KernPrefixSumRows(Image<Tout> out, Image<Tin> in)
+//	{
+//		const int row = blockIdx.y;
+//		PrefixSum<Tout, Tin>(out.RowPtr(row), in.RowPtr(row), in.w, 2 * blockDim.x);
+//	}
+//
+//	void PrefixSumRowsPZ(cv::cuda::GpuMat& in, cv::cuda::GpuMat& out)
+//	{
+//		dim3 blockDim = dim3(1, 1);
+//		while (blockDim.x < ceil(in.step / 2.0f)) blockDim.x <<= 1;
+//		const dim3 gridDim = dim3(1, in.rows);
+//		KernPrefixSumRows << <gridDim, blockDim, 2 * sizeof(float) * blockDim.x >> > (out, in);
+//	}
+//
+//	void TransposePZ(cv::cuda::GpuMat& in, cv::cuda::GpuMat& out)
+//	{
+//
+//	}
+#pragma endregion
+
+
+#pragma region ComputeSmoothGradient
+
+	__global__ void KernalComputeSmoothnessGradien1(
+		Mesh::Vertex* vertices,
+		int* vvSize,
+		G3DIdx* vvAdj,
+		bool* vertexBoundary,
+		SmoothnessGradientParam* param,
+		Point3f* smoothGrad1)
+	{
+		int idx = blockIdx.x * blockDim.x + threadIdx.x;
+		int idy = threadIdx.y;
+		int id = gridDim.x * blockDim.x * idy + idx;
+		if (id >= param->idxEnd - param->idxStart)
+			return;
+
+		if (vertexBoundary[id]) {
+			return;
+		}
+
+		int start = 0;
+		if (id != 0) {
+			start = vvSize[id - 1];
+		}
+		int end = vvSize[id];
+		if (end <= start) {
+			return;
+		}
+
+		//Gradient1
+		Point3f& grad = smoothGrad1[id];
+		grad.x = 0;
+		grad.y = 0;
+		grad.z = 0;
+
+		for (int i = start; i < end; ++i) {
+			grad.x += vertices[vvAdj[i]].x;
+			grad.y += vertices[vvAdj[i]].y;
+			grad.z += vertices[vvAdj[i]].z;
+		}
+
+		grad.x = grad.x / (end - start) - vertices[id].x;
+		grad.y = grad.y / (end - start) - vertices[id].y;
+		grad.z = grad.z / (end - start) - vertices[id].z;
+		const float regularityScore((G3DFloat)Norm(grad));
+		atomicAdd(&param->score, regularityScore);
+	}
+
+	__global__ void KernalComputeSmoothnessGradien2(
+		int* vvSize,
+		G3DIdx* vvAdj,
+		bool* vertexBoundary,
+		SmoothnessGradientParam* param,
+		Point3f* smoothGrad1,
+		Point3f* smoothGrad2)
+	{
+		int idx = blockIdx.x * blockDim.x + threadIdx.x;
+		int idy = threadIdx.y;
+		int id = gridDim.x * blockDim.x * idy + idx;
+		if (id >= param->idxEnd - param->idxStart)
+			return;
+
+		if (vertexBoundary[id]) {
+			return;
+		}
+
+		int start = 0;
+		if (id != 0) {
+			start = vvSize[id - 1];
+		}
+		int end = vvSize[id];
+		if (end <= start) {
+			return;
+		}
+
+		Point3f& grad2 = smoothGrad2[id];
+		grad2.x = 0;
+		grad2.y = 0;
+		grad2.z = 0;
+
+		G3DFloat w(0);
+		for (int i = start; i < end; ++i) {
+			const Mesh::VIndex idxVert(vvAdj[i]);
+			Point3f& tempPt = smoothGrad1[idxVert];
+			grad2.x += tempPt.x;
+			grad2.y += tempPt.y;
+			grad2.z += tempPt.z;
+
+			Mesh::VIndex numVert(vvSize[idxVert]);
+			if (idxVert > 0) {
+				numVert = numVert - vvSize[idxVert - 1];
+			}
+			if (numVert > 0) {
+				w += G3DFloat(1.0) / G3DFloat(numVert);
+			}
+		}
+		const G3DFloat numVert(G3DFloat(end - start));
+		const G3DFloat nrm(G3DFloat(1.0) / (G3DFloat(1.0) + w / numVert));
+		grad2.x = grad2.x * (nrm / numVert) - smoothGrad1[id].x * nrm;
+		grad2.y = grad2.y * (nrm / numVert) - smoothGrad1[id].y * nrm;
+		grad2.z = grad2.z * (nrm / numVert) - smoothGrad1[id].z * nrm;
+	}
+
+	void RunKernelComputeSmoothnessGradient1(
+		SmoothnessGradientParam* cpuParam,
+		Mesh::Vertex* vertices,
+		int* vvSize,
+		G3DIdx* vvAdj,
+		bool* vertexBoundary,
+		SmoothnessGradientParam* param,
+		Point3f* smoothGrad1)
+	{
+		dim3 threadsPerBlock(32, 16);
+		int blockNum = (cpuParam->idxEnd - cpuParam->idxStart + 32 * 16 - 1) / (32 * 16);
+		KernalComputeSmoothnessGradien1 << <blockNum, threadsPerBlock >> > (vertices, vvSize, vvAdj, vertexBoundary, param, smoothGrad1);
+	}
+
+	void RunKernelComputeSmoothnessGradient2(SmoothnessGradientParam* cpuParam,
+		int* vvSize,
+		G3DIdx* vvAdj,
+		bool* vertexBoundary,
+		SmoothnessGradientParam* param,
+		Point3f* smoothGrad1,
+		Point3f* smoothGrad2)
+	{
+		dim3 threadsPerBlock(32, 16);
+		int blockNum = (cpuParam->idxEnd - cpuParam->idxStart + 32 * 16 - 1) / (32 * 16);
+		KernalComputeSmoothnessGradien2 << <blockNum, threadsPerBlock >> > (vvSize, vvAdj, vertexBoundary, param, smoothGrad1, smoothGrad2);
+	}
+
+
+	extern "C" void cudaComputeSmoothnessGradient(
+		const Mesh::VertexArr& vertices,
+		const G3DRefineMeshCUDAImpl::VVAdjArr& vertexVertices,
+		const BoolArr& vertexBoundary,
+		Mesh::VIndex idxStart,
+		Mesh::VIndex idxEnd,
+		float& score1,
+		Point3f* gpuSmoothGrad1,
+		Point3f* gpuSmoothGrad2)
+	{
+		thrust::device_vector<Mesh::Vertex> gpuVerticesVec(vertices);
+		Mesh::Vertex* gpuVerticesPtr = gpuVerticesVec.data().get();
+
+		std::vector<int> vvSize(vertexVertices.size());
+		std::vector<G3DIdx> vvAdj;
+		for (int i = 0; i < vertexVertices.size(); ++i)
+		{
+			if (i > 0) {
+				vvSize[i] = vvSize[i - 1] + vertexVertices[i].size();
+			}
+			else {
+				vvSize[i] = vertexVertices[i].size();
+			}
+			vvAdj.insert(vvAdj.end(), vertexVertices[i].begin(), vertexVertices[i].end());
+		}
+		thrust::device_vector<int> gpuVVSizeVec(vvSize);
+		int* gpuVVSizePtr = gpuVVSizeVec.data().get();
+		thrust::device_vector<G3DIdx> gpuVVAdjVec(vvAdj);
+		G3DIdx* gpuVVAdjPtr = gpuVVAdjVec.data().get();
+
+		thrust::device_vector<bool> gpuVertexBoundaryVec(vertexBoundary);
+		bool* gpuVertexBoundaryPtr = gpuVertexBoundaryVec.data().get();
+
+		SmoothnessGradientParam* param = new SmoothnessGradientParam;
+		param->idxStart = idxStart;
+		param->idxEnd = idxEnd;
+		param->score = 0;
+		SmoothnessGradientParam* gpuParam = 0;
+		cudaMalloc(&gpuParam, sizeof(SmoothnessGradientParam));
+		cudaMemcpy(gpuParam, param, sizeof(SmoothnessGradientParam), cudaMemcpyHostToDevice);
+
+		RunKernelComputeSmoothnessGradient1(param, gpuVerticesPtr, gpuVVSizePtr, gpuVVAdjPtr, gpuVertexBoundaryPtr, gpuParam, gpuSmoothGrad1);
+		cudaThreadSynchronize();
+		RunKernelComputeSmoothnessGradient2(param, gpuVVSizePtr, gpuVVAdjPtr, gpuVertexBoundaryPtr, gpuParam, gpuSmoothGrad1, gpuSmoothGrad2);
+
+		cudaMemcpy(param, gpuParam, sizeof(SmoothnessGradientParam), cudaMemcpyDeviceToHost);
+		score1 = param->score;
+	}
+
+	extern "C" void cudaComputeSmoothnessGradient2(
+		const Point3f* vertices,
+		int* gpuVVSize,
+		G3DIdx* gpuVVAdj,
+		bool* gpuVertexBoundary,
+		/*const G3DRefineMeshCUDAImpl::VVAdjArr& vertexVertices,
+		const BoolArr& vertexBoundary,*/
+		Mesh::VIndex idxStart,
+		Mesh::VIndex idxEnd,
+		float& score1,
+		Point3f* gpuSmoothGrad1,
+		Point3f* gpuSmoothGrad2)
+	{
+		/*std::vector<int> vvSize(vertexVertices.size());
+		std::vector<G3DIdx> vvAdj;
+		for (int i = 0; i < vertexVertices.size(); ++i)
+		{
+			if (i > 0) {
+				vvSize[i] = vvSize[i - 1] + vertexVertices[i].size();
+			}
+			else {
+				vvSize[i] = vertexVertices[i].size();
+			}
+			vvAdj.insert(vvAdj.end(), vertexVertices[i].begin(), vertexVertices[i].end());
+		}
+		thrust::device_vector<int> gpuVVSizeVec(vvSize);
+		int* gpuVVSizePtr = gpuVVSizeVec.data().get();
+		thrust::device_vector<G3DIdx> gpuVVAdjVec(vvAdj);
+		G3DIdx* gpuVVAdjPtr = gpuVVAdjVec.data().get();
+
+		thrust::device_vector<bool> gpuVertexBoundaryVec(vertexBoundary);
+		bool* gpuVertexBoundaryPtr = gpuVertexBoundaryVec.data().get();*/
+
+		SmoothnessGradientParam* param = new SmoothnessGradientParam;
+		param->idxStart = idxStart;
+		param->idxEnd = idxEnd;
+		param->score = 0;
+		SmoothnessGradientParam* gpuParam = 0;
+		cudaMalloc(&gpuParam, sizeof(SmoothnessGradientParam));
+		cudaMemcpy(gpuParam, param, sizeof(SmoothnessGradientParam), cudaMemcpyHostToDevice);
+
+		RunKernelComputeSmoothnessGradient1(param, (Mesh::Vertex*)vertices, gpuVVSize, gpuVVAdj, gpuVertexBoundary, gpuParam, gpuSmoothGrad1);
+		cudaThreadSynchronize();
+		RunKernelComputeSmoothnessGradient2(param, gpuVVSize, gpuVVAdj, gpuVertexBoundary, gpuParam, gpuSmoothGrad1, gpuSmoothGrad2);
+
+		cudaMemcpy(param, gpuParam, sizeof(SmoothnessGradientParam), cudaMemcpyDeviceToHost);
+		score1 = param->score;
+	}
+
+	extern "C" void cudaComputeSmoothnessGradient1(
+		const Point3f* vertices,
+		const G3DRefineMeshCUDAImpl::VVAdjArr& vertexVertices,
+		const BoolArr& vertexBoundary,
+		Mesh::VIndex idxStart,
+		Mesh::VIndex idxEnd,
+		float& score1,
+		Point3f* gpuSmoothGrad1,
+		Point3f* gpuSmoothGrad2)
+	{
+		std::vector<int> vvSize(vertexVertices.size());
+		std::vector<G3DIdx> vvAdj;
+		for (int i = 0; i < vertexVertices.size(); ++i)
+		{
+			if (i > 0) {
+				vvSize[i] = vvSize[i - 1] + vertexVertices[i].size();
+			}
+			else {
+				vvSize[i] = vertexVertices[i].size();
+			}
+			vvAdj.insert(vvAdj.end(), vertexVertices[i].begin(), vertexVertices[i].end());
+		}
+		thrust::device_vector<int> gpuVVSizeVec(vvSize);
+		int* gpuVVSizePtr = gpuVVSizeVec.data().get();
+		thrust::device_vector<G3DIdx> gpuVVAdjVec(vvAdj);
+		G3DIdx* gpuVVAdjPtr = gpuVVAdjVec.data().get();
+
+		thrust::device_vector<bool> gpuVertexBoundaryVec(vertexBoundary);
+		bool* gpuVertexBoundaryPtr = gpuVertexBoundaryVec.data().get();
+
+		SmoothnessGradientParam* param = new SmoothnessGradientParam;
+		param->idxStart = idxStart;
+		param->idxEnd = idxEnd;
+		param->score = 0;
+		SmoothnessGradientParam* gpuParam = 0;
+		cudaMalloc(&gpuParam, sizeof(SmoothnessGradientParam));
+		cudaMemcpy(gpuParam, param, sizeof(SmoothnessGradientParam), cudaMemcpyHostToDevice);
+
+		RunKernelComputeSmoothnessGradient1(param, (Mesh::Vertex*)vertices, gpuVVSizePtr, gpuVVAdjPtr, gpuVertexBoundaryPtr, gpuParam, gpuSmoothGrad1);
+		cudaThreadSynchronize();
+		RunKernelComputeSmoothnessGradient2(param, gpuVVSizePtr, gpuVVAdjPtr, gpuVertexBoundaryPtr, gpuParam, gpuSmoothGrad1, gpuSmoothGrad2);
+
+		cudaMemcpy(param, gpuParam, sizeof(SmoothnessGradientParam), cudaMemcpyDeviceToHost);
+		score1 = param->score;
+	}
+
+
+#pragma endregion
+
+#pragma region CombineGradients
+	__global__ void kernelCombineGradients(int * devVertNum,
+		G3DFloat * devPhotoGrad,
+		G3DFloat * devSmoothGrad2,
+		G3DFloat * devPhoGradNorm,
+		G3DFloat * devRunParams,
+		G3Double * devGradOut)
+	{
+		//extern __shared__ G3Double gradsOut[]; 再用共享内存测一下, devGradOut[thrId * 3] = gradsOut[thrId * 3]直接把共享内存给全局
+		//int thrId = blockDim.x*blockIdx.x + threadIdx.x;
+
+		int idx = blockDim.x*blockIdx.x + threadIdx.x;
+		int idy = blockDim.y*blockIdx.y + threadIdx.y;
+		int thrId = idy * gridDim.x*blockDim.x + idx;
+
+		if (thrId < *devVertNum)
+		{
+			devGradOut[thrId * 3] = devPhoGradNorm[thrId] > 0 ?
+				(devPhotoGrad[thrId * 3] / devPhoGradNorm[thrId] + devSmoothGrad2[thrId * 3] * devRunParams[1]) :
+				(devSmoothGrad2[thrId * 3] * devRunParams[1]);
+			devGradOut[thrId * 3 + 1] = devPhoGradNorm[thrId] > 0 ?
+				(devPhotoGrad[thrId * 3 + 1] / devPhoGradNorm[thrId] + devSmoothGrad2[thrId * 3 + 1] * devRunParams[1]) :
+				(devSmoothGrad2[thrId * 3 + 1] * devRunParams[1]);
+			devGradOut[thrId * 3 + 2] = devPhoGradNorm[thrId] > 0 ?
+				(devPhotoGrad[thrId * 3 + 2] / devPhoGradNorm[thrId] + devSmoothGrad2[thrId * 3 + 2] * devRunParams[1]) :
+				(devSmoothGrad2[thrId * 3 + 2] * devRunParams[1]);
+		}
+		__syncthreads();
+
+	}
+
+
+	extern "C" void RunKernelCombineGradients(int hostVertNum,
+		int * devVertNum,
+		G3DFloat * devPhotoGrad,
+		G3DFloat * devSmoothGrad2,
+		G3DFloat * devPhoGradNorm,
+		G3DFloat * devRunParams,
+		G3Double * devGradOut)
+	{
+		dim3 threads(32, 8);
+		int thrPerBlock = 32 * 8;
+		dim3 blocks((hostVertNum + thrPerBlock - 1) / thrPerBlock);
+
+		kernelCombineGradients << <blocks, threads >> > (devVertNum,
+			devPhotoGrad,
+			devSmoothGrad2,
+			devPhoGradNorm,
+			devRunParams,
+			devGradOut);
+	}
+
+#pragma endregion
+
+#pragma region CombineAllGradients
+
+	__global__ void kernelCombineAllGradients(int * devVertNum,
+		G3DFloat * devRunParams,
+		G3DFloat * devPhotoGrad,
+		G3DFloat * devSmoothGrad1,
+		G3DFloat * devSmoothGrad2,
+		G3DFloat * devPhoGradNorm,
+		G3Double * devGradOut)
+	{
+		//extern __shared__ G3DFloat gradsOut[]; 再用共享内存测一下,devGradOut[thrId * 3]=gradsOut[thrId * 3]直接把共享内存给全局
+		int idx = blockDim.x*blockIdx.x + threadIdx.x;
+		int idy = blockDim.y*blockIdx.y + threadIdx.y;
+		int thrId = idy * gridDim.x*blockDim.x + idx;
+		if (thrId < *devVertNum)
+		{
+			devGradOut[thrId * 3] = devPhoGradNorm[thrId] > 0 ?
+				(devPhotoGrad[thrId * 3] / devPhoGradNorm[thrId] +
+					devSmoothGrad2[thrId * 3] * devRunParams[1] -
+					devSmoothGrad1[thrId * 3] * devRunParams[0]) :
+					(devSmoothGrad2[thrId * 3] * devRunParams[1] -
+						devSmoothGrad1[thrId * 3] * devRunParams[0]);
+
+			devGradOut[thrId * 3 + 1] = devPhoGradNorm[thrId] > 0 ?
+				(devPhotoGrad[thrId * 3 + 1] / devPhoGradNorm[thrId] +
+					devSmoothGrad2[thrId * 3 + 1] * devRunParams[1] -
+					devSmoothGrad1[thrId * 3 + 1] * devRunParams[0]) :
+					(devSmoothGrad2[thrId * 3 + 1] * devRunParams[1] -
+						devSmoothGrad1[thrId * 3 + 1] * devRunParams[0]);
+
+			devGradOut[thrId * 3 + 2] = devPhoGradNorm[thrId] > 0 ?
+				(devPhotoGrad[thrId * 3 + 2] / devPhoGradNorm[thrId] +
+					devSmoothGrad2[thrId * 3 + 2] * devRunParams[1] -
+					devSmoothGrad1[thrId * 3 + 2] * devRunParams[0]) :
+					(devSmoothGrad2[thrId * 3 + 2] * devRunParams[1] -
+						devSmoothGrad1[thrId * 3 + 2] * devRunParams[0]);
+		}
+		__syncthreads();
+	}
+
+	extern "C" void RunKernelCombineAllGrads(int hostVertNum,
+		int * devVertNum,
+		G3DFloat * devRunParams,
+		G3DFloat * devPhotoGrad,
+		G3DFloat * devSmoothGrad1,
+		G3DFloat * devSmoothGrad2,
+		G3DFloat * devPhoGradNorm,
+		G3Double * devGradOut)
+	{
+		dim3 threads(32, 8);
+		int thrPerBlock = 32 * 8;
+		dim3 blocks((hostVertNum + thrPerBlock - 1) / thrPerBlock);
+
+		//kernelCombineAllGradients << <blocks, threads,3*( *devVertNum)*sizeof(G3Double) >> > (devVertNum,
+//		boost::timer t1;
+		kernelCombineAllGradients << <blocks, threads >> > (devVertNum,
+			devRunParams,
+			devPhotoGrad,
+			devSmoothGrad1,
+			devSmoothGrad2,
+			devPhoGradNorm,
+			devGradOut);
+		//		printf("kernel time:%f \n", t1.elapsed());
+	}
+
+#pragma endregion
+
+	__global__ void kernalAccumulatePhotoGrade(
+		int* len,
+		Point3f* iterGrad,
+		Point3f* photoGrad,
+		G3DIdx* iterGradNorm,
+		G3DFloat* photoGradNorm)
+	{
+		int idx = blockIdx.x * blockDim.x + threadIdx.x;
+		int idy = threadIdx.y;
+		int id = gridDim.x * blockDim.x * idy + idx;
+		if (id >= *len)
+			return;
+
+		if (iterGradNorm[id] > 0)
+		{
+			atomicAdd(&photoGrad[id].x, iterGrad[id].x);
+			atomicAdd(&photoGrad[id].y, iterGrad[id].y);
+			atomicAdd(&photoGrad[id].z, iterGrad[id].z);
+			atomicAdd(&photoGradNorm[id], 1);
+		}
+	}
+
+	extern "C" void cudaAccumulatePhotoGrad(
+		int len,
+		Point3f* iterGrad,
+		Point3f* photoGrad,
+		G3DIdx* iterGradNorm,
+		G3DFloat* photoGradNorm)
+	{
+		int* gpuLen = 0;
+		cudaMalloc(&gpuLen, sizeof(int));
+		cudaMemcpy(gpuLen, &len, sizeof(int), cudaMemcpyHostToDevice);
+
+		dim3 tpb(32, 8);
+		int numBlock = (len + 32 * 8 - 1) / (32 * 8);
+		kernalAccumulatePhotoGrade << <numBlock, tpb >> > (gpuLen, iterGrad, photoGrad, iterGradNorm, photoGradNorm);
+	}
+
+
+	__global__ void kernelAddGrad2Vertexs(double* step, size_t* size, Point3f* gpuVertexs, G3Double* gpuGrads)
+	{
+		int idx = blockIdx.x * blockDim.x + threadIdx.x;
+		int idy = threadIdx.y;
+		int id = gridDim.x * blockDim.x * idy + idx;
+		if (id >= *size)
+			return;
+
+		if (!DeviceIsFinite(gpuGrads[id * 3]) ||
+			!DeviceIsFinite(gpuGrads[id * 3 + 1]) ||
+			!DeviceIsFinite(gpuGrads[id * 3 + 2]))
+			return;
+
+		gpuVertexs[id].x -= gpuGrads[id * 3] * (*step);
+		gpuVertexs[id].y -= gpuGrads[id * 3 + 1] * (*step);
+		gpuVertexs[id].z -= gpuGrads[id * 3 + 2] * (*step);
+	}
+
+	extern "C" void cudaAddGrad2Vertexs(double step, size_t size, Point3f* gpuVertexs, G3Double* gpuGrads)
+	{
+		double* gpuStep = 0;
+		cudaMalloc(&gpuStep, sizeof(double));
+		cudaMemcpy(gpuStep, &step, sizeof(double), cudaMemcpyHostToDevice);
+
+		size_t* gpuSize = 0;
+		cudaMalloc(&gpuSize, sizeof(size_t));
+		cudaMemcpy(gpuSize, &size, sizeof(size_t), cudaMemcpyHostToDevice);
+
+		dim3 tpb(32, 16);
+		int numBlocks = (size + 32 * 16 - 1) / (32 * 16);
+		kernelAddGrad2Vertexs << <numBlocks, tpb >> > (gpuStep, gpuSize, gpuVertexs, gpuGrads);
+	}
+#pragma region CalcFaceNormals
+	__global__ void KernelCalcFaceNormals(int faceSize, Mesh::Face* gpuFaces, Point3f* gpuVertexs, Mesh::Normal* gpuNormalsOut)
+	{
+		int idx = blockIdx.x*blockDim.x + threadIdx.x;
+		//int idy = blockIdx.y*blockDim.y + threadIdx.y;
+		if (idx >= faceSize)
+			return;
+
+		auto& face = gpuFaces[idx];
+		Point3f& v0 = gpuVertexs[face.x];
+		Point3f& v1 = gpuVertexs[face.y];
+		Point3f& v2 = gpuVertexs[face.z];
+
+		auto left = Point3f{ v1.x - v0.x,v1.y - v0.y,v1.z - v0.z };
+		auto right = Point3f{ v2.x - v0.x,v2.y - v0.y,v2.z - v0.z };
+
+		gpuNormalsOut[idx] = Normalized(Cross3D(left, right));
+	}
+
+	extern "C" void CUDACalcFaceNormals(int faceSize, Mesh::Face* gpuFaces, Point3f* gpuVertexs, Mesh::Normal* gpuNormalsOut)
+	{
+		int threads = 32 * 8;
+		int blocks = (faceSize + threads - 1) / threads;
+		KernelCalcFaceNormals << <blocks, threads >> > (faceSize, gpuFaces, gpuVertexs, gpuNormalsOut);
+	}
+
+#pragma endregion
+}
