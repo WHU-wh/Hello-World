@@ -40,6 +40,32 @@ warp中的线程不能访问一个bank，访问一个bank就会有bank冲突（�
 同一个warp中访问的数据最好放不同bank。（看郭QQ收藏帖子）。
     在冲突最严重的情况下，速度会比全局显存还慢，但是如果 half-warp 的线程访问同一地址的时候，会产生一次广播，其速度反而没有下降。在不发生 bank conflict 
 时，访问共享存储器的速度与寄存器相同。
+    for (int i = thrIdY - halfWindow; i < thrIdY + halfWindow + 1; i++) {
+			for (int j = thrIdX - halfWindow; j < thrIdX + halfWindow+1; j++) {
+				a = imgA[i][j];  以前是这么写的，会慢，先用寄存器给行存下来，减少了访问共享内存数量
+				b = imgB[i][j];
+				meanA += a;
+				meanB += b;
+				varA += a*a;
+				varB += b*b;
+				integAxB += a*b;
+			}
+		}
+    
+    
+    for (int i = thrIdY - halfWindow; i < thrIdY + halfWindow + 1; i++) {
+			curRowA = imgA[i];
+			curRowB = imgB[i];
+			for (int j = thrIdX - halfWindow; j < thrIdX + halfWindow+1; j++) {
+				a = curRowA[j];
+				b = curRowB[j];
+				meanA += a;
+				meanB += b;
+				varA += a*a;
+				varB += b*b;
+				integAxB += a*b;
+			}
+		}
     
     
 常量内存
