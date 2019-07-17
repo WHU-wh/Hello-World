@@ -29,3 +29,27 @@ std::ifstream fin("C:/ptx.txt");
 		fout << vec[i] << std::endl;
 	}
 	fout.close();
+	
+
+各种输出方法总结：
+1、单个字符 
+   1.1 cin.get（char &）：将读入的字符放在参数 char 中
+   返回值是cin对象（cin其实就是istream对象，下面string的getline函数也是返回istream对象)，放在while中会判定为true，当到达文件末尾时，返回值判定为false。
+       遍历每行所有字符
+        char ch;
+	while(cin.get(ch))
+	{ //paocess  input  }
+   1.2 cin.get（void）：返回值是读入字符对应的ASCII码，读取下一个字符，即使是空格符、换行符也可以读进来，返回其对应ascii（空格是32）。
+       所以遍历每行所有字符方法：
+        char ch;
+	ch = cin.get();
+	while(ch != '\n')
+	{
+		cout << ch ;
+		ch=cin.get();
+	}
+       
+   1.3 cin：最基本的，cin>>inchar; 是会过滤掉不可见字符（空格换行等）。 如输入A BC，那么要cin>>a>>b>>c,会过滤掉A和B中间的空格。
+2、字符串
+	
+	
