@@ -38,6 +38,137 @@ int main()
 	{
 		std::cout << key[i] << "\n";
 	}*/
+	
+	*****************************************************************************************************************
+	// TestThrusetSortByKey.cpp : 此文件包含 "main" 函数。程序执行将在此处开始并结束。
+//
+
+#include "pch.h"
+#include <thrust/host_vector.h>
+#include <thrust/sort.h>
+#include <thrust/reduce.h>
+#include <thrust/merge.h>
+
+struct val
+{
+	float x;
+	float y;
+	float z;
+
+	val __host__ __device__ operator+(const val& right)const {
+		return{ this->x + right.x,this->y + right.y ,this->z + right.z };
+	}
+};
+
+int main()
+{
+	/*std::cout << "Hello World!\n";
+
+	int key[20];
+	for (int i = 0; i < 20; i++) {
+		key[i] = i%3;
+	}
+
+	val valArr[20];
+	for (int i = 0; i < 20; i++) {
+		valArr[i] = { float(i%3),float(i % 3),float(i % 3) };
+	}
+
+	thrust::sort_by_key(key, key + 20, valArr);
+
+	for (int i = 0; i < 20; i++)
+	{
+		std::cout << key[i] << "\n";
+	}*/
+	//system("pause");
+
+	//int resKey[20];
+	//int resVal[20];
+
+	//int valArr2[20];
+	//for (int i = 0; i < 20; i++)
+	//{
+	//	valArr2[i] = 1;
+	//}
+	////thrust::reduce_by_key(key, key + 20, valArr2, resRuduKey, resRuduVal);
+	//thrust::reduce_by_key(key, key + 20, valArr2, resKey, resVal);
+
+
+#include <vector>
+	struct val
+	{
+		float x;
+		float y;
+		float z;
+
+		val __host__ __device__ operator+(const val& right)const {
+			return{ this->x + right.x,this->y + right.y ,this->z + right.z };
+		}
+
+		void __host__ __device__ operator=(const val right) {
+			this->x = right.x;
+			this->y = right.y;
+			this->z = right.z;
+		}
+	};
+
+	const int N = 7;
+	//int A[N] = { 1,1, 3, 3, 3, 2, 2 }; // input keys
+	//val B[N];
+	//for (int i = 0; i < N; i++)  //input vals
+	//{
+	//	B[i] = { float(i), float(i), float(i) };
+	//}
+
+	//int C[N]; // output keys
+	//val D[N]; // output values
+	//
+	////需要4个数组作为参数，原数据Key数组，源数据Val数组，结果Key数组，结果Val数组
+	////thrust::sort_by_key
+	//auto resPair=thrust::reduce_by_key(A, A + N, B, C, D);
+	////for(;resPair.first!= resPair.first->end())
+	////auto tmp=resPair.first;
+	////问题：key和val要组织到各自的数组，不能整合成一个结构体，
+
+	//std::cout << "ResKey:\n";
+	//for (int i = 0; i < 4; i++)
+	//{
+	//	std::cout << C[i] << "\n";
+	//}
+
+	//std::cout << "ResVal:\n";
+	//for (int i = 0; i < 4; i++)
+	//{
+	//	printf("%f %f %f\n", D[i].x, D[i].y, D[i].z);
+	//}
+
+	std::vector<int> tmp{ 1,1, 3, 3, 3, 2, 2 };
+	thrust::host_vector<int>A (tmp); // input keys
+	
+	std::vector <val> tmpB(N);
+	for (int i = 0; i < N; i++)  //input vals
+	{
+		tmpB[i] = { float(i), float(i), float(i) };
+	}
+	thrust::host_vector<val>B(tmpB); // input keys
+
+	thrust::host_vector<int> resKey(N);
+	thrust::host_vector<val> resVal(N);
+	//auto resPair=thrust::reduce_by_key(A.data(), A.data() + N, B.data(),resKey.data(), resVal.data());
+	
+	thrust::sort_by_key(A.begin(), A.end(), B.begin());
+
+	auto resPair=thrust::reduce_by_key(A.begin(), A.end(), B.begin(),resKey.begin(), resVal.begin());
+	resKey.erase(resPair.first, resKey.end());
+	resVal.erase(resPair.second, resVal.end());
+	
+	for (int i = 0; i < resKey.size(); i++)
+		printf("\n%d", resKey[i]);
+
+	return 0;
+
+}
+
 	//system("pause");
 
 	//int resKey[20];
