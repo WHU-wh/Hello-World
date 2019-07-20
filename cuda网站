@@ -1,4 +1,9 @@
 https://www.cnblogs.com/ahfuzhang/p/10852659.html    GPUMat详解，其中有step详解
+channels() 返回4， 说明每个像素是四个字节（每个像素位置上数据类型的字节？），格式是BGRA。
+step是图片每行的字节数。注意：这个值是按2的幂对齐的。我测试中使用的图片，宽度是480，每像素四字节的话，一行应该是1920; 而此处的step是2048， 
+每行多出来32像素，这些像素alpha通道值为0。
+因此，虽然看起来dataend-datastart是GPU内存所占空间大小，但实际的所占空间是：step*rows
+
 https://www.cnblogs.com/carl2380/p/7122698.html   cuda从入门到精通
 https://blog.csdn.net/dcrmg/article/details/54959306   cuda原子操作
 https://blog.csdn.net/q583956932/article/details/78826987   cuda原子操作介绍，师兄看的寄存器那个
