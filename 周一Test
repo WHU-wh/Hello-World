@@ -1,0 +1,223 @@
+__global__ void  KernelComputeDZNCCGradient(
+		//cv::cuda::PtrStepSz<float2> znccImg,
+		cv::cuda::PtrStepSz<G3DFloat> imgA,
+		cv::cuda::PtrStepSz<cv::Vec2f> imgBGrad,//这是原始的B影像索贝尔梯度图
+		cv::cuda::PtrStepSz<G3DFloat> imgB,//这是AB影像
+		cv::cuda::PtrStepSz<G3DFloat> depthMapA,
+		cv::cuda::PtrStepSz<int> faceMapA,
+		cv::cuda::PtrStepSz<cv::Vec3f> baryMapA,
+		cv::cuda::PtrStepSz<uchar> mask,
+		Mesh::Face* faces,
+		Mesh::Normal* normals,
+		Camera* gpuCameraA,
+		Camera* gpuCameraB,
+		G3DFloat RegularizationScale,
+		int halfWindow,
+		Point3f* gpuPhotoGrad,
+		G3DIdx* gpuPhotoGradNorm)
+	{
+		//return;//0.07
+		__shared__ float s1[sMemHeigh][sMemWidth];
+		__shared__ float s2[sMemHeigh][sMemWidth];
+		//__shared__ float s3[blockWidth][blockWidth][2];
+		//__shared__ float sMemCam[33];
+		//step1 加载影像和相机参数到共享内存  
+		InitPairImg(halfWindow, s1, s2, imgA, imgB);
+		__syncthreads();
+
+
+		/*__shared__ float s1[sMemHeigh*sMemWidth];
+		__shared__ float s2[sMemHeigh*sMemWidth];
+		InitPairImgEx(halfWindow, s1, s2, imgA, imgB);
+		__syncthreads();*/
+		//return;//0.19
+
+		int idxInGrid = blockIdx.x*blockWidth + threadIdx.x;
+		int idyInGrid = blockIdx.y*blockHeigh + threadIdx.y;
+
+		if (idyInGrid >= imgA.rows || idxInGrid >= imgA.cols)
+			return;
+
+		if (!mask(idyInGrid, idxInGrid)) return;
+
+		/*for (int i = 0; i < 9; i++) {
+			sMemCam[i] = gpuCameraA->K[i];
+		}
+		for (int i = 0; i < 9; i++) {
+			sMemCam[i + 9] = gpuCameraA->R[i];
+		}
+
+		for (int j = 0; j < 3; j++) {
+			sMemCam[18 + j] = gpuCameraA->C[j];
+		}
+		for (int k = 0; k < 12; k++) {
+			sMemCam[21 + k] = gpuCameraB->P[k];
+		}*/
+
+		//step2 for循环计算该像素对应窗口内的均值方差和DZNCC。
+		float dzncc;
+		//CalcMeanVarDZNCC1(s1, s2, threadIdx.x + 3, threadIdx.y + 3, halfWindow, dzncc, idxInGrid, idyInGrid);
+		CalcMeanVarDZNCC(s1, s2, threadIdx.x + 3, threadIdx.y + 3, halfWindow, dzncc, idxInGrid, idyInGrid);
+}
+
+************************************************************************************************************************
+__device__ void InitPairImg(
+		int halfWindow,
+		float s1[sMemHeigh][sMemWidth],
+		float s2[sMemHeigh][sMemWidth],
+		//float sCam[33],
+		//Camera* camA,
+		//Camera* camB,
+		cv::cuda::PtrStepSz<G3DFloat> imgA,
+		cv::cuda::PtrStepSz<G3DFloat> imgB)
+	{
+		/*//加载影像A
+		int thrId = threadIdx.y*blockWidth + threadIdx.x;
+		int destY = thrId / sMemWidth;
+		int destX = thrId % sMemWidth;
+		int srcX = blockIdx.x*blockWidth + destX - halfWindow;
+		int srcY = blockIdx.y*blockHeigh + destY - halfWindow;
+		if (srcY >= 0 && srcY < imgA.rows && srcX >= 0 && srcX < imgA.cols)
+			s1[destY][destX] = imgA(srcY, srcX);
+		else
+			s1[destY][destX] = 0;
+
+		thrId = threadIdx.y*blockWidth + threadIdx.x + blockWidth* blockHeigh;
+		destY = thrId / sMemWidth;
+		destX = thrId % sMemWidth;
+		srcX = blockIdx.x*blockWidth + destX - halfWindow;
+		srcY = blockIdx.y*blockHeigh + destY - halfWindow;
+		if (destY < sMemWidth)
+		{
+			if (srcY >= 0 && srcY < imgA.rows && srcX >= 0 && srcX < imgA.cols)
+				s1[destY][destX] = imgA(srcY, srcX);
+			else
+				s1[destY][destX] = 0;
+		}
+		//加载影像B
+		thrId = threadIdx.y*blockWidth + threadIdx.x;
+		destY = thrId / sMemWidth;
+		destX = thrId % sMemWidth;
+		srcX = blockIdx.x*blockWidth + destX - halfWindow;
+		srcY = blockIdx.y*blockHeigh + destY - halfWindow;
+		if (srcY >= 0 && srcY < imgB.rows && srcX >= 0 && srcX < imgB.cols)
+			s2[destY][destX] = imgB(srcY, srcX);
+		else
+			s2[destY][destX] = 0;
+
+		thrId = threadIdx.y*blockWidth + threadIdx.x + blockWidth * blockHeigh;
+		destY = thrId / sMemWidth;
+		destX = thrId % sMemWidth;
+		srcX = blockIdx.x*blockWidth + destX - halfWindow;
+		srcY = blockIdx.y*blockHeigh + destY - halfWindow;
+		if (destY < sMemWidth)
+		{
+			if (srcY >= 0 && srcY < imgB.rows && srcX >= 0 && srcX < imgB.cols)
+				s2[destY][destX] = imgB(srcY, srcX);
+			else
+				s2[destY][destX] = 0;
+		}*/
+
+		//加载影像A
+		int thrId = threadIdx.y*blockWidth + threadIdx.x;
+		int destY = thrId / sMemWidth;
+		int destX = thrId % sMemWidth;
+		int srcX = blockIdx.x*blockWidth + destX - halfWindow;
+		int srcY = blockIdx.y*blockHeigh + destY - halfWindow;
+		if (srcY >= 0 && srcY < imgA.rows && srcX >= 0 && srcX < imgA.cols)
+		{
+			/*s1[destY][destX] = imgA(srcY, srcX);//从全局内存影响上取值用30ms
+			s2[destY][destX] = imgB(srcY, srcX);*/
+			
+			//下面测试bank冲突
+			/*s1[destY][destX] = 22;  //往共享内存上放值也用30ms
+			s2[destY][destX] = 23;*/
+			//s1[destX][destY] = 22;
+			//s2[destX][destY] = 23;
+		}
+		else
+		{
+			s1[destY][destX] = 0;
+			s2[destY][destX] = 0;   
+		}
+
+		srcX = srcX - destX;
+		srcY = srcY - destY;
+		thrId = thrId + blockWidth * blockHeigh;
+		destY = thrId / sMemWidth;
+		destX = thrId % sMemWidth;
+		srcX = srcX + destX;
+		srcY = srcY + destY;
+		if (destY < sMemWidth)
+		{
+			if (srcY >= 0 && srcY < imgA.rows && srcX >= 0 && srcX < imgA.cols)
+			{
+				/*s1[destY][destX] = imgA(srcY, srcX);
+				s2[destY][destX] = imgB(srcY, srcX);*/
+				
+				/*s1[destX][destY] = 22;
+				s2[destX][destY] = 23;*/
+			}
+			else
+			{
+				s1[destY][destX] = 0;
+				s2[destY][destX] = 0;
+			}
+		}
+
+	}
+  
+  ********************************************************************************************************************
+  __device__ void CalcMeanVarDZNCC(
+		//cv::cuda::PtrStepSz<float2> znccImg,
+		float imgA[sMemHeigh][sMemWidth],
+		float imgB[sMemHeigh][sMemWidth],
+		int thrIdX, int thrIdY,
+		int halfWindow, float & DZNCC,
+		int idxInGrid, int idyInGrid)
+	{
+		float integAxB = 0;
+		float meanA = 0;
+		float meanB = 0;
+		float varA = 0;
+		float varB = 0;
+
+		float a = 0;
+		float b = 0;
+		float * curRowA;
+		float * curRowB;
+		for (int i = thrIdY - halfWindow; i < thrIdY + halfWindow + 1; i++) {
+			curRowA = imgA[i];
+			curRowB = imgB[i];
+			for (int j = thrIdX - halfWindow; j < thrIdX + halfWindow + 1; j++) {
+				//printf("%8.6f %8.6f   ", imgA[i][j], imgB[i][j]);
+				a = curRowA[j];
+				b = curRowB[j];
+				meanA += a;
+				meanB += b;
+				varA += a*a;
+				varB += b*b;
+				integAxB += a*b;
+			}
+		}//0.36
+
+		int pixelNum = (halfWindow * 2 + 1)*(halfWindow * 2 + 1);
+		float denoPixelNum = 1.0f / pixelNum;
+		
+		float cv = integAxB * denoPixelNum;
+		meanA = meanA * denoPixelNum;
+		meanB = meanB * denoPixelNum;
+		varA = varA* denoPixelNum - meanA*meanA;
+		varB = varB* denoPixelNum - meanB*meanB;
+
+		float denoSqrtVarAVarB = 1.0 / sqrtf(varA*varB);
+		float zncc = denoSqrtVarAVarB *(cv - meanA*meanB);
+		float ZNCCinvVB = zncc / varB;
+		float dZNCC(imgA[thrIdY][thrIdX] * denoSqrtVarAVarB -
+					imgB[thrIdY][thrIdX] * ZNCCinvVB +
+					meanB *ZNCCinvVB -
+					meanA * denoSqrtVarAVarB);
+
+		float minVAVB(fmin(varA, varB));
+		DZNCC = -(minVAVB / (minVAVB + float(0.0015))) * dZNCC;
+	}
