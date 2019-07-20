@@ -4,6 +4,9 @@ step是图片每行的字节数。注意：这个值是按2的幂对齐的。我
 每行多出来32像素，这些像素alpha通道值为0。
 因此，虽然看起来dataend-datastart是GPU内存所占空间大小，但实际的所占空间是：step*rows
 
+那么，当我们有某行的指针，想获得GPUMat的下一行指针，可以这样rowPointer = (const cv::Vec2f *)((const char*)rowPointer+image.step) ;这其实就是
+GPUMat的ptr函数中用到的方法。
+
 https://www.cnblogs.com/carl2380/p/7122698.html   cuda从入门到精通
 https://blog.csdn.net/dcrmg/article/details/54959306   cuda原子操作
 https://blog.csdn.net/q583956932/article/details/78826987   cuda原子操作介绍，师兄看的寄存器那个
