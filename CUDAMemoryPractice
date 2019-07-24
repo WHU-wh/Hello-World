@@ -1,0 +1,110 @@
+纹理内存
+
+一开始用cudamalloc的内存取绑定2维纹理索引，可能会有问题，不是任何行列的内存都能绑定成功，如10，10就不行
+      //#include <cuda_runtime.h>
+      //#include <stdio.h>
+      //#include "device_launch_parameters.h"
+      //
+      //#define HEIGHT  10
+      //#define WIDTH  10
+      //
+      //texture<float, 2, cudaReadModeElementType> tex;
+      //
+      //__global__ void PrintWH()
+      //{
+      //	int x = blockIdx.x * blockDim.x + threadIdx.x;
+      //	int y = blockIdx.y * blockDim.y + threadIdx.y;
+      //	float v = tex2D(tex, x, y);
+      //	printf("%d , %d , %f\n", y, x, v);
+      //}
+      //
+      //__global__ void init_data(float * a, int n) {
+      //	for (int i = 0; i < n; i++) {
+      //		a[i] = i ;
+      //		//printf("%f \n",a[i]);
+      //	}
+      //}
+      //
+      //
+      //int main()
+      //{
+      //	float *buffer;
+      //	dim3 grid(1, 1, 1);
+      //	dim3 block(WIDTH, HEIGHT, 1);
+      //
+      //	cudaMalloc(&buffer, WIDTH*HEIGHT * sizeof(float));
+      //	init_data << <1, 1 >> > (buffer, WIDTH*HEIGHT);
+      //
+      //	cudaChannelFormatDesc desc = cudaCreateChannelDesc<float>();
+      //
+      //	int texW = 16;
+      //	int texH = 8;
+      //	cudaError_t err = cudaBindTexture2D(0, tex, buffer, desc, WIDTH, HEIGHT, WIDTH * sizeof(float));
+      //
+      //	PrintWH << <grid, block >> > ();
+      //	cudaUnbindTexture(tex);
+      //	cudaFree(buffer);
+      //}
+      
+
+然后换作cudaArray去绑定纹理索引，就可以成功，还可以用cudaMallocPatch的内存取绑定，还没有试验。cudaMalloc
+      #include <cuda_runtime.h>
+      #include <stdio.h>
+      #include "device_launch_parameters.h"
+      #include <opencv2/opencv.hpp>
+
+      #define HEIGHT  10
+      #define WIDTH  10
+
+      texture<float, 2, cudaReadModeElementType> tex;
+      cudaArray * cuArray;
+
+      using namespace cv;
+
+      __global__ void init_data(float * a, int n) {
+        for (int i = 0; i < n; i++) {
+          a[i] = i ;
+          //printf("%f \n",a[i]);
+        }
+      }
+
+      __global__ void PrintWH(cv::cuda::PtrStepSzf resImg )
+      {
+        int x = blockIdx.x * blockDim.x + threadIdx.x;
+        int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+        if (x >= WIDTH || y >= HEIGHT)  return;
+        //float v = tex2D(tex, x, y);
+        resImg(y,x) = tex2D(tex, x, y);
+        //printf("%d , %d , %f\n", y, x, v);
+      }
+
+      void main()
+      {
+        //将10*16的影像给纹理内存，然后从纹理内存中取
+        float * src=new float[WIDTH*HEIGHT];
+        for (int i = 0; i < WIDTH*HEIGHT; i++) {
+          src[i] = i;
+        }
+
+        cudaError err;
+        //1.创建cudaArray
+        cudaChannelFormatDesc desc = cudaCreateChannelDesc<float>();
+        cudaMallocArray(&cuArray, &desc, WIDTH, HEIGHT);
+        //2.给cudaMallocArray拷贝值,这个还有同步和异步的版本，异步就是流的版本，详见https://blog.csdn.net/jdhanhua/article/details/4813940
+        cudaMemcpyToArray(cuArray,0,0, src, WIDTH*HEIGHT*sizeof(float),cudaMemcpyHostToDevice);
+        //3.将cudaArray绑定到纹理索引
+        err=cudaBindTextureToArray(tex, cuArray);
+
+        dim3 threads(8, 8);
+        int blockX = (WIDTH + 7) / 8;
+        int blockY = (HEIGHT + 7) / 8;
+        dim3 blocks(blockX, blockY);
+
+        cv::cuda::GpuMat devMat(HEIGHT, WIDTH, CV_32FC1,Scalar(0));
+        PrintWH << <blocks, threads >> > (devMat);
+
+        cv::Mat tmp;
+        devMat.download(tmp);
+        cudaFreeArray(cuArray);
+      }
