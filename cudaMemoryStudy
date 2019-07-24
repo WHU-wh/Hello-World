@@ -100,6 +100,8 @@ int number = data[3];这样不会造成 bank conflict，因为所有的 thread �
 https://blog.csdn.net/i_chaoren/article/details/78061379  好，有官方实例代码，还有cudaArray和线性显存绑定问纹理内存的区别。
 https://blog.csdn.net/fb_help/article/details/82143156   纹理Texture所需参数详解
 https://www.cnblogs.com/riddick/p/7892663.html  用cudaArray绑定2维纹理内存的实例
+https://blog.csdn.net/zhangpinghao/article/details/16811773 用cudaArray和cudaMallocPatch绑定2维纹理内存的实例。二维的不要用cudaMalloc出来的地址
+，因为不是多大的2维纹理都能链接成功，详见笔记本。
 
      纹理存储器（texture memory）是一种只读存储器，由GPU用于纹理渲染的的图形专用单元发展而来，因此也提供了一些特殊功能。
 
