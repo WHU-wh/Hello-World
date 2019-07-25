@@ -108,3 +108,387 @@
         devMat.download(tmp);
         cudaFreeArray(cuArray);
       }
+      
+      
+纹理内存反而不快***************************************************************************************************************************
+#include <cuda_runtime.h>
+#include <stdio.h>
+#include "device_launch_parameters.h"
+#include <opencv2/opencv.hpp>
+#include <time.h>
+#include <boost\timer.hpp>
+
+#define HEIGHT  2000
+#define WIDTH  3000
+#define HALFWINDOW 3
+
+texture<float, 2, cudaReadModeElementType> tex;
+cudaArray * cuArray;
+
+using namespace cv;
+
+__global__ void init_data(float * a, int n) {
+	for (int i = 0; i < n; i++) {
+		a[i] = i;
+		//printf("%f \n",a[i]);
+	}
+}
+
+__global__ void PrintWH(cv::cuda::PtrStepSzf srcImg, cv::cuda::PtrStepSzf resImg)
+{
+	int idx = blockIdx.x * blockDim.x + threadIdx.x;
+	int idy = blockIdx.y * blockDim.y + threadIdx.y;
+
+	if (idx >= WIDTH || idy >= HEIGHT)  return;
+	idx = idx + HALFWINDOW;
+	idy = idy + HALFWINDOW;
+	
+	//int leftX = idx - 1;
+	//int rightX = idx + 1;
+	//int topY = idy - 1;
+	//int botY = idy + 1;
+
+	float sum = 0;
+	float * rowPtr;
+	for (int i = idy - HALFWINDOW; i < idy + HALFWINDOW+1; i++) {
+		rowPtr = srcImg.ptr(i);
+		for (int j = idx - HALFWINDOW; j < idx + HALFWINDOW+1; j++) {
+			sum += rowPtr[j];
+		}
+	}
+
+	int windowSize = (HALFWINDOW * 2 + 1)*(HALFWINDOW * 2 + 1);
+	float denoWindSize = 1.0 / windowSize;
+	resImg(idy - HALFWINDOW, idx - HALFWINDOW)= sum * denoWindSize;
+
+	/*sum += resImg(topY,leftX);
+	sum += resImg(topY,idx);
+	sum += resImg(topY,rightX);
+
+	sum += resImg(idy,leftX);
+	sum += resImg(idy,idx);
+	sum += resImg(idy,rightX);
+
+	sum += resImg(botY,leftX);
+	sum += resImg(botY,idx);
+	sum += resImg(botY,rightX);*/
+
+	//resImg(idy, idx) = sum / 3;
+}
+
+__global__ void PrintGlobalMem(cv::cuda::PtrStepSzf resImg)
+{
+	int idx = blockIdx.x * blockDim.x + threadIdx.x;
+	int idy = blockIdx.y * blockDim.y + threadIdx.y;
+
+	if (idx >= WIDTH || idy >= HEIGHT)  return;
+
+	//float v = tex2D(tex, x, y);
+	idx = idx + HALFWINDOW;
+	idy = idy + HALFWINDOW;
+
+	float sum = 0.0;
+	for (int i = idy - HALFWINDOW; i < idy + HALFWINDOW + 1; i++) {
+		//rowPtr = srcImg.ptr(i);
+#pragma unroll
+		for (int j = idx - HALFWINDOW; j < idx + HALFWINDOW + 1; j++) {
+			sum += tex2D(tex,j,i);
+		}
+	}
+
+	/////*int leftX = idx - 1;
+	////int rightX = idx + 1;
+	////int topY = idy - 1;
+	////int botY = idy + 1;
+
+	////float sum = 0;
+	////sum += tex2D(tex, leftX, topY);
+	////sum += tex2D(tex, idx, topY);
+	////sum += tex2D(tex, rightX, topY);
+
+	////sum += tex2D(tex, leftX, idy);
+	////sum += tex2D(tex, idx, idy);
+	////sum += tex2D(tex, rightX, idy);
+		
+	////sum += tex2D(tex, leftX, botY);
+	////sum += tex2D(tex, idx, botY);
+	////sum += tex2D(tex, rightX, botY);*/
+
+	int windowSize = (HALFWINDOW * 2 + 1)* (HALFWINDOW * 2 + 1);
+	float denoWindSize = 1.0 / windowSize;
+	resImg(idy- HALFWINDOW, idx- HALFWINDOW) = sum * denoWindSize;
+	//__syncthreads();
+}
+
+#define TEXDEFINE
+void main()
+{
+#ifdef TEXDEFINE
+	//将10*16的影像给纹理内存，然后从纹理内存中取
+	int GlobalHEIGHT = HEIGHT + 2* HALFWINDOW;
+	int GlobalWIDTH = WIDTH + 2 * HALFWINDOW;
+	float * src = new float[GlobalWIDTH*GlobalHEIGHT];
+	for (int i = 0; i < GlobalWIDTH*GlobalHEIGHT; i++) {
+		src[i] = i;
+	}
+
+	boost::timer t;
+	cudaError err;
+	//1.创建cudaArray
+	cudaChannelFormatDesc desc = cudaCreateChannelDesc<float>();
+	cudaMallocArray(&cuArray, &desc, GlobalWIDTH, GlobalHEIGHT);
+	//2.给cudaArray拷贝值,这个还有同步和异步的版本，异步就是流的版本，详见https://blog.csdn.net/jdhanhua/article/details/4813940
+	cudaMemcpyToArray(cuArray, 0, 0, src, GlobalWIDTH*GlobalHEIGHT * sizeof(float), cudaMemcpyHostToDevice);
+	//3.将cudaArray绑定到纹理索引
+	err = cudaBindTextureToArray(tex, cuArray);
+
+	dim3 threads(32, 8);
+	int blockX = (WIDTH + 31) / 32;
+	int blockY = (HEIGHT + 7) / 8;
+	dim3 blocks(blockX, blockY);
+
+	cv::cuda::GpuMat devMat(HEIGHT, WIDTH, CV_32FC1, Scalar(0));
+	cv::Mat tmpBefore(GlobalHEIGHT, GlobalWIDTH, CV_32FC1, src);
+
+	boost::timer t1;
+	for(int i=0;i<1000;i++)
+	    PrintGlobalMem << <blocks, threads >> > (devMat);
+	printf("\ntime:%f", t1.elapsed());
+
+	/*cv::Mat tmp;
+	devMat.download(tmp);*/
+	cudaFreeArray(cuArray);
+	printf("\ntotal time:%f", t.elapsed());
+#else
+	int GlobalHEIGHT = HEIGHT + 2*HALFWINDOW;
+	int GlobalWIDTH = WIDTH + 2 * HALFWINDOW;
+	float * src = new float[GlobalWIDTH*GlobalHEIGHT];
+	for (int i = 0; i < GlobalWIDTH*GlobalHEIGHT; i++) {
+		src[i] = i;
+	}
+
+	boost::timer t;
+	dim3 threads(32, 8);
+	int blockX = (WIDTH + 32 - 1) / 32;
+	int blockY = (HEIGHT + 8 - 1) / 8;
+	dim3 blocks(blockX, blockY);
+
+	float * devData;
+	cudaMalloc(&devData, GlobalWIDTH*GlobalHEIGHT * sizeof(float));
+	cudaMemcpy(devData, src, GlobalWIDTH*GlobalHEIGHT * sizeof(float), cudaMemcpyHostToDevice);
+
+	cv::cuda::GpuMat devMat(GlobalHEIGHT, GlobalWIDTH, CV_32FC1, devData);
+	cv::cuda::GpuMat devResMat(HEIGHT, WIDTH, CV_32FC1, Scalar(0));
+
+	cv::Mat tmpBefore;
+	devMat.download(tmpBefore);
+
+	boost::timer t1; 
+	for(int i=0;i<1000;i++)
+	    PrintWH << <blocks, threads >> > (devMat, devResMat);
+	printf("\ntime:%f", t1.elapsed());
+
+	/*t1.restart();
+	cv::Mat tmpEnd;
+	devResMat.download(tmpEnd);
+	printf("\ndownload time:%f", t1.elapsed());*/
+
+	cudaFree(devData);
+	printf("\ntotal time:%f", t.elapsed());
+#endif 
+}
+
+
+/*************************************************************************************************************************************************/
+//网上实例
+ //#include <opencv2\opencv.hpp> 
+ //#include <iostream>
+ //#include <string>
+ //#include <cuda.h>
+ //#include <cuda_runtime.h>
+ //#include <device_launch_parameters.h>
+ //
+ //using namespace std;
+ //using namespace cv;
+ //
+ ////声明CUDA纹理
+ //texture <uchar4, cudaTextureType2D, cudaReadModeNormalizedFloat> refTex1;
+ //texture <uchar4, cudaTextureType2D, cudaReadModeNormalizedFloat> refTex2;
+ ////声明CUDA数组
+ //cudaArray* cuArray1;
+ //cudaArray* cuArray2;
+ ////通道数
+ //cudaChannelFormatDesc cuDesc = cudaCreateChannelDesc<uchar4>();
+ //
+ //
+ //__global__ void weightAddKerkel(uchar *pDstImgData, int imgHeight, int imgWidth,int channels)
+ //{
+ //    const int tidx=blockDim.x*blockIdx.x+threadIdx.x;
+ //    const int tidy=blockDim.y*blockIdx.y+threadIdx.y;
+ //
+ //    if (tidx<imgWidth && tidy<imgHeight)
+ //    {
+ //        float4 lenaBGR,moonBGR;
+ //        //使用tex2D函数采样纹理
+ //        lenaBGR=tex2D(refTex1, tidx, tidy);
+ //        moonBGR=tex2D(refTex2, tidx, tidy);
+ //
+ //        int idx=(tidy*imgWidth+tidx)*channels;
+ //        float alpha=0.5;
+ //        pDstImgData[idx+0]=(alpha*lenaBGR.x+(1-alpha)*moonBGR.x)*255;
+ //        pDstImgData[idx+1]=(alpha*lenaBGR.y+(1-alpha)*moonBGR.y)*255;
+ //        pDstImgData[idx+2]=(alpha*lenaBGR.z+(1-alpha)*moonBGR.z)*255;
+ //        pDstImgData[idx+3]=0;
+ //    }
+ //}
+ //
+ //void main()
+ //{
+ //    Mat Lena=imread("data/lena.jpg");
+ //    Mat moon=imread("data/moon.jpg");
+ //    cvtColor(Lena, Lena, CV_BGR2BGRA);
+ //    cvtColor(moon, moon, CV_BGR2BGRA);
+ //    int imgWidth=Lena.cols;
+ //    int imgHeight=Lena.rows;
+ //    int channels=Lena.channels();
+ //
+ //    //设置纹理属性
+ //    cudaError_t t;
+ //    refTex1.addressMode[0] = cudaAddressModeClamp;
+ //    refTex1.addressMode[1] = cudaAddressModeClamp;
+ //    refTex1.normalized = false;
+ //    refTex1.filterMode = cudaFilterModeLinear;
+ //    //绑定cuArray到纹理
+ //    cudaMallocArray(&cuArray1, &cuDesc, imgWidth, imgHeight);
+ //    t = cudaBindTextureToArray(refTex1, cuArray1);
+ //
+ //    refTex2.addressMode[0] = cudaAddressModeClamp;
+ //    refTex2.addressMode[1] = cudaAddressModeClamp;
+ //    refTex2.normalized = false;
+ //    refTex2.filterMode = cudaFilterModeLinear;
+ //     cudaMallocArray(&cuArray2, &cuDesc, imgWidth, imgHeight);
+ //    t = cudaBindTextureToArray(refTex2, cuArray2);
+ //
+ //    //拷贝数据到cudaArray
+ //    t=cudaMemcpyToArray(cuArray1, 0,0, Lena.data, imgWidth*imgHeight*sizeof(uchar)*channels, cudaMemcpyHostToDevice);
+ //    t=cudaMemcpyToArray(cuArray2, 0,0, moon.data, imgWidth*imgHeight*sizeof(uchar)*channels, cudaMemcpyHostToDevice);
+ //
+ //    //输出图像
+ //    Mat dstImg=Mat::zeros(imgHeight, imgWidth, CV_8UC4);
+ //    uchar *pDstImgData=NULL;
+ //    t=cudaMalloc(&pDstImgData, imgHeight*imgWidth*sizeof(uchar)*channels);
+ //
+ //    //核函数，实现两幅图像加权和
+ //    dim3 block(8,8);
+ //    dim3 grid( (imgWidth+block.x-1)/block.x, (imgHeight+block.y-1)/block.y );
+ //    weightAddKerkel<<<grid, block, 0>>>(pDstImgData, imgHeight, imgWidth, channels);
+ //    cudaThreadSynchronize();
+ //
+ //    //从GPU拷贝输出数据到CPU
+ //    t=cudaMemcpy(dstImg.data, pDstImgData, imgWidth*imgHeight*sizeof(uchar)*channels, cudaMemcpyDeviceToHost);
+ //
+ //    //显示
+ //    namedWindow("show");
+ //    imshow("show", dstImg);
+ //    waitKey(0);
+ //}
+
+
+//#include <cuda_runtime.h>
+ //#include <iostream>
+ //#include <time.h>
+ //
+ //const int WIDTH = 16;
+ //const int HEIGHT = 16;
+ //const int SIZE = HEIGHT*WIDTH;
+ //const int HALFWINDOW = 1;
+ //const int WINDOWSIZE = (HALFWINDOW * 2 + 1)*(HALFWINDOW * 2 + 1);
+ //
+ //texture<float, 2> texImgIn;
+ //texture<float, 2, cudaReadModeElementType> texImgIn;
+ //
+ //
+ //__global__ void calcWindowAver(float * dev_dstImg)
+ //{
+ //	int idx = blockDim.x*blockIdx.x + threadIdx.x;
+ //	int idy = blockDim.y*blockIdx.y + threadIdx.y;
+ //	int id = idy * gridDim.x*blockDim.x + idx;
+ //
+ //	if (idx >= WIDTH || idy >= HEIGHT) return;
+ //
+ //	int leftX = idx - 1;
+ //	int rightX = idx + 1;
+ //	int topY = idy - 1;
+ //	int botY = idy + 1;
+ //
+ //	/*if (idx == 0) leftX += 1;
+ //	if (idy == 0) topY += 1;
+ //	if (idx == WIDTH - 1) rightX -= 1;
+ //	if (idy == HEIGHT - 1) botY -= 1;*/
+ //
+ //	float tem11 = tex2D(texImgIn, leftX, topY);
+ //	float tem12 = tex2D(texImgIn, idx, topY);
+ //	float tem13 = tex2D(texImgIn, rightX, topY);
+ //	float tem21 = tex2D(texImgIn, leftX, idy);
+ //	float tem22 = tex2D(texImgIn, idx, idy);
+ //	float tem23 = tex2D(texImgIn, rightX, idy);
+ //
+ //	float sum = tex2D(texImgIn, leftX, topY) + tex2D(texImgIn, idx, topY)+ tex2D(texImgIn, rightX, topY)+
+ //		      tex2D(texImgIn, leftX, idy) + tex2D(texImgIn, idx, idy) + tex2D(texImgIn, rightX, idy)+
+ //		      tex2D(texImgIn, leftX, botY) + tex2D(texImgIn, idx, botY) + tex2D(texImgIn, rightX, botY);
+ //	float aver = sum / WINDOWSIZE;
+ //	dev_dstImg[id] = aver;
+ //}
+ //
+ //int main()
+ //{
+ //	float * img=new float[SIZE] ;
+ //	for (int i = 0; i < SIZE; i++)     
+ //	{
+ //		img[i] = (float)(i % WIDTH);
+ //	} 
+ //
+ //	float * dev_img;
+ //	cudaMalloc(&dev_img, SIZE* sizeof(float));
+ //	cudaMemcpy(dev_img, img, SIZE * sizeof(float), cudaMemcpyHostToDevice);
+ //
+ //	cudaError err;
+ //	cudaChannelFormatDesc desc= cudaCreateChannelDesc<float>();
+ //	err=cudaBindTexture2D(0, texImgIn, dev_img, desc, WIDTH, HEIGHT, WIDTH * sizeof(float));
+ //
+ //	//cudaChannelFormatDesc descOut = cudaCreateChannelDesc<float>();
+ //	//cudaBindTexture2D(0, texImgOut, dev_img, &descOut, WIDTH, HEIGHT, SIZE * sizeof(int));
+ //
+ //	float * dev_dstImg;
+ //	cudaMalloc(&dev_dstImg, SIZE);
+ //
+ //	dim3 threads(32, 4);
+ //	int blockx = (WIDTH + 32 - 1) / 32;
+ //	int blocky = (HEIGHT + 4 - 1) / 4;
+ //	dim3 blocks(blockx, blocky);
+ //	
+ //	clock_t start, end;
+ //	start = clock();
+ //	for(int i=0;i<1;i++)
+ // 	    calcWindowAver<<<blocks,threads>>>(dev_dstImg);
+ //	end = clock();
+ //	printf("\ntime:%f", (start - end) / CLOCKS_PER_SEC);
+ //
+ //	float * host_dstImg = new float[SIZE];
+ //	cudaMemcpy(host_dstImg, dev_dstImg, SIZE * sizeof(float), cudaMemcpyDeviceToHost);
+ //	for (int i = 0; i <HEIGHT; i++)
+ //	{
+ //		printf("\n");
+ //		for (int j = 0; j < WIDTH; j++)
+ //		{
+ //			int id = i*WIDTH + j;
+ //			printf("%f  ", host_dstImg[id]);
+ //		}
+ //	}
+ //
+ //	cudaUnbindTexture(texImgIn);
+ //	delete[] host_dstImg;
+ //	cudaFree(dev_img);
+ //	cudaFree(dev_dstImg);
+ //    return 0;
+ //}
