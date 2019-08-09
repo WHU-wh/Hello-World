@@ -106,4 +106,17 @@ C++map用法：
   }
   注意：map的[]中括号不是代表第几个pair，是代表key所对应的val，如map的[3]代表key为3对应的val值，所以不能用[]那样遍历，
        所以想输出val直接用map[key].
+4、查找和删除
+  auto iter = map1.find（key值）;
+  if(iter!=map1.end())  //存在则删除
+     map1.erase(iter);
+     
+C++set用法：
+vector<int> vec{ 1,2,6,3,5,7,3,4 };
+set<int> mySet(vec.begin(), vec.end());
+for (auto elem : mySet)
+   cout << elem << endl;
+//cout按顺序输出1,2,3,4,5,6,7
 
+1、创建并赋值，可用vec的begin和end
+2、它默认
