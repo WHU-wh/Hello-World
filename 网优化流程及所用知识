@@ -1,0 +1,13 @@
+1、加载影像
+   1、1 读取影像
+   cv::imread(strig imgPath）；
+   1、2 RGB2Gray： convertTo与cvtColor函数结合
+   cv：：Mat的convertTo函数，参数1为outArray，一般为一个destMat，参数二为结果的DataType，如cv::DataType<float>::type
+   g3dImg.pixelMat.convertTo(gray, cv::DataType<float>::type);
+   cvtColor(gray, img, cv::COLOR_BGR2GRAY);这个才是rgb2gray函数，上边那个是数据类型转化，将3通道uint转为3通道float
+   1、3 多附图合成一幅多通道图cv::merge（）
+   cv::Mat grad[G3D_INT2];
+   cv::merge(grad, G3D::G3D_INT2, view.imageGrad);
+   1.4 索贝尔算子
+   cv::Sobel(img, grad[G3D::G3D_INT0], cv::DataType<G3DFloat>::type,
+             G3D::G3D_INT1, G3D::G3D_INT0, G3D::G3D_INT3, 1/8);
