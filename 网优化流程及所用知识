@@ -11,3 +11,22 @@
    1.4 索贝尔算子
    cv::Sobel(img, grad[G3D::G3D_INT0], cv::DataType<G3DFloat>::type,
              G3D::G3D_INT1, G3D::G3D_INT0, G3D::G3D_INT3, 1/8);
+             
+2、预处理
+   2、1 计算点面关系
+   遍历面，对于面中每个点，看它是否已经存了当前面，没有则把当前面存为临接面
+   const auto& vertexArr = base->vertices;
+	const auto& faceArr = base->faces;
+	vfs.clear();
+	vfs.resize(vertexArr.size());
+
+	for (size_t i = 0; i < faceArr.size(); ++i) {
+		const auto& face = faceArr[i];
+		for (size_t v = 0; v < G3D_INT3; ++v) {
+			auto &fs(vfs[face[v]]);
+			if (std::find(fs.begin(), fs.end(), (G3DIdx)i) != fs.end()) {
+				continue;
+			}
+			vfs[face[v]].push_back(static_cast<unsigned int>(i));
+		}
+	}
