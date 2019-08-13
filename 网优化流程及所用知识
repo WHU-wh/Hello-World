@@ -16,17 +16,37 @@
    2、1 计算点面关系
    遍历面，对于面中每个点，看它是否已经存了当前面，没有则把当前面存为临接面
    const auto& vertexArr = base->vertices;
-	const auto& faceArr = base->faces;
-	vfs.clear();
-	vfs.resize(vertexArr.size());
+   const auto& faceArr = base->faces;
+   vfs.clear();
+   vfs.resize(vertexArr.size());
 
-	for (size_t i = 0; i < faceArr.size(); ++i) {
-		const auto& face = faceArr[i];
-		for (size_t v = 0; v < G3D_INT3; ++v) {
-			auto &fs(vfs[face[v]]);
-			if (std::find(fs.begin(), fs.end(), (G3DIdx)i) != fs.end()) {
+   for (size_t i = 0; i < faceArr.size(); ++i) {
+	const auto& face = faceArr[i];
+	for (size_t v = 0; v < G3D_INT3; ++v) {
+	     auto &fs(vfs[face[v]]);
+	     if (std::find(fs.begin(), fs.end(), (G3DIdx)i) != fs.end()) {
+		continue;
+	     }
+	     vfs[face[v]].push_back(static_cast<unsigned int>(i));
+	}
+   }
+   
+   2.2 点点关系
+   const auto& faceArr = base->faces;
+   const auto& vertexArr = base->vertices;
+   vvs.clear();
+   vvs.resize(vertexArr.size());
+
+   for (size_t i = 0; i < faceArr.size(); ++i) {
+	const auto& face = faceArr[i];
+	for (int v = 0; v < static_cast<int>(G3D_INT3); ++v) {
+		auto& verts(vvs[face[v]]);
+		for (int j = 1; j < static_cast<int>(G3D_INT3); ++j) {
+			auto idxVert(face[(v + j) % G3D_INT3]);//难点在这句，由当前点在面中的id号去算另外两个，如1号点，要找0、2点
+			if (std::find(verts.begin(), verts.end(), (G3DIdx)idxVert) != verts.end()) {
 				continue;
 			}
-			vfs[face[v]].push_back(static_cast<unsigned int>(i));
+			verts.push_back(idxVert);
 		}
 	}
+   }
