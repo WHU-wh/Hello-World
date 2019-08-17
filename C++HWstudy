@@ -139,4 +139,45 @@ for (auto elem : mySet)
 //cout按顺序输出1,2,3,4,5,6,7
 
 1、创建并赋值，可用vec的begin和end
-2、它默认
+2、它默认从小到大排序，且去除重复。
+
+ *************************************************************************************************************************************
+
+解析字符串，得到用逗号分隔的所有字符串，如abc，bcd，ad，ggg注意最后一个字符串后面没有逗号了
+1、确定用while循环，for循环也可以，while循环更精简
+2、while循环里判断当前符号是不是逗号，不是逗号就获取，逗号就略过。
+3、因为最后一个字符串后没有逗号，最好一个字符串要怎么处理
+
+int main()
+{
+	char ch;
+	string input;
+	cin >> input;
+
+	vector<string> resVec;
+	string curPart="";
+	const char * inPtr = input.c_str();
+	ch = inPtr[0];
+	while (*inPtr != '\0') //字符串结尾这样判断
+	{
+		ch = *inPtr;
+		if (*inPtr == ',') {
+			resVec.push_back(curPart);
+			curPart = "";
+		}
+		else {
+			curPart += ch;
+		}
+
+		inPtr++;
+	}
+	//最后一个字符串后没有逗号了，不会通过上面的判断到逗号再加进来，
+	//此时curPart里存的就是，可以直接加进来。
+	resVec.push_back(curPart);
+
+	for (auto elem : resVec) {
+		cout << elem << endl;
+	}
+	return 0;
+}
+
