@@ -29,3 +29,4 @@ TPoint3<T> PointI2C(const Camera& camera, const TPoint3<T>& ip)
 }
 
 https://blog.csdn.net/u013472489/article/details/78736909 摄影测量旋转矩阵知识
+https://blog.csdn.net/baidu_38172402/article/details/82501097 摄影测量内外方位元素
