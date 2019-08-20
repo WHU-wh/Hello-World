@@ -27,3 +27,5 @@ TPoint3<T> PointI2C(const Camera& camera, const TPoint3<T>& ip)
 	res[2] = static_cast<T>(ip.z);
 	return res;
 }
+
+https://blog.csdn.net/u013472489/article/details/78736909 摄影测量旋转矩阵知识
