@@ -1,0 +1,77 @@
+   最近在做3D重建的毕业设计，写代码写到想吐。老师感觉原来的那个数据集不太好，叫我换了一个，没办法只好换掉，摄像机的参数又要重新搞，有点烦。
+还好数据集里面已经标定好了参数，可以直接读取，省了我不少功夫。可是问题又来了，他只给出了摄像机矩阵P，只能想办法把他分解成A,R,T的形式。
+
+新的数据集：http://roboimagedata.compute.dtu.dk/?page_id=36
+
+下面开始正题：怎么从P中分解出A,R,T
+
+1. 实现C++下的qr分解
+    qr分解在有很多种办法，在Matlab中更是有现成的qr()函数，直接调用就可以，省去了不少功夫。但是在C++实现的，在网上搜了好久也没有搜到，
+最后只好自己动手了，代码挺短，但是还是写了很久，能力有限。
+    本代码是基于opencv2.4.9中的Mat矩阵进行编写的，经过测试，和Matlab中的qr（）函数结果一致。
+
+int sign(double x)
+{
+  if(x < 0) return -1;
+  else return 1;
+}
+ 
+void householder(Mat x, Mat y, Mat& H)
+{
+  Mat u,I;
+  y = -sign(x.at<double>(0,0)) * norm(x) * y / norm(y);
+  
+  u = x - y;
+  I = Mat::eye(x.cols,x.cols,CV_64FC1);
+  H = I - 2 * u.t() * u / (u * u.t());
+}
+ 
+void qr(const Mat A, Mat& Q, Mat& R)
+{
+  int m,n;
+  Mat x,y,w,v,H,temp_H;
+  
+  m = A.rows;
+  n = A.cols;
+  A.copyTo(R);
+  Q = Mat::eye(Size(n,n),CV_64FC1);
+  
+  for(int i=0;i<n-1;i++)
+  {    
+    w = R.colRange(i,i+1).rowRange(i,n);
+    w.copyTo(v);
+    x = v.reshape(0,1);
+    y = Mat::zeros(Size(n-i,1),CV_64FC1);
+    y.at<double>(0,0) = 1; 
+    
+    householder(x,y,temp_H);
+    
+    H = Mat::eye(n,n,CV_64FC1);
+    
+    for(int a=0; a<n-i; a++)
+      for(int b=0; b<n-i; b++)
+      {
+	H.at<double>(a+i,b+i) = temp_H.at<double>(a,b);
+      }
+    Q = Q*H;
+    R = H*R;
+  }
+  
+}
+2. 分解矩阵P
+    实现了qr分解后，其实分解就很简单了。
+
+void art(const Mat P, Mat& K, Mat& R, Mat& T)
+{
+  Mat Q,U,B;
+  Q = P.colRange(0,3).inv();
+  qr(Q,U,B);
+  K = B.inv();
+  K = K / K.at<double>(2,2);
+  R = U.inv();
+  T = B*P.rowRange(0,3).colRange(3,4);
+}
+OK，就是这么简单
+ ———————————————— 
+版权声明：本文为CSDN博主「fsencen」的原创文章，遵循CC 4.0 by-sa版权协议，转载请附上原文出处链接及本声明。
+原文链接：https://blog.csdn.net/fsencen/article/details/79416630
