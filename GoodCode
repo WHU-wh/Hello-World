@@ -72,6 +72,56 @@ void art(const Mat P, Mat& K, Mat& R, Mat& T)
   T = B*P.rowRange(0,3).colRange(3,4);
 }
 OK，就是这么简单
- ———————————————— 
-版权声明：本文为CSDN博主「fsencen」的原创文章，遵循CC 4.0 by-sa版权协议，转载请附上原文出处链接及本声明。
-原文链接：https://blog.csdn.net/fsencen/article/details/79416630
+
+****************************************************************************************************
+归并排序
+using namespace std;  时间复杂度nlogn，因为最好情况下分logn层，每层比较n/2次。 所以为（n/2）logn，其中1/2可以去掉。
+
+int arr1[10] = {1,7,3,5,8,2,5,4,1,9};
+int tmp[10];
+
+
+void MergeSort(int left,int right)
+{
+	if (left >= right) return;
+
+	int mid = (left + right) / 2;
+	MergeSort(left, mid);
+	MergeSort(mid+1, right);
+
+	int l = left;
+	int r = mid+1;
+	int resIdx = left;
+
+	while (l<=mid && r<=right)
+	{
+		if (arr1[l] <= arr1[r]) {
+			tmp[resIdx++] = arr1[l++];
+		}
+		else
+		{
+			tmp[resIdx++] = arr1[r++];
+		}
+	}
+
+	for (; l <= mid; l++) {
+		tmp[resIdx++] = arr1[l];
+	}
+
+	for (; r <= right; r++) {
+		tmp[resIdx++] = arr1[r];
+	}
+
+	for (int i = left; i < right + 1; i++) {
+		arr1[i] = tmp[i];
+	}
+}
+
+int main()
+{
+	MergeSort(0,9);
+	for (int elem : arr1)
+		cout << elem << endl;
+	system("pause");
+	return 1;
+}
