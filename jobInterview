@@ -1,2 +1,8 @@
 https://www.cnblogs.com/Java3y/p/8639937.html  堆排序
 
+堆排序算法：主要在初始化堆过程和每次选取最大数后重新建堆的过程；
+其中第一步的时间复杂度 O(n)
+第二步的时间复杂度 O(nlogn)
+综上，堆排序的时间复杂度为 O(nlogn)
+推到过程 ： https://blog.csdn.net/loveliuzz/article/details/77618530
+
