@@ -6,3 +6,65 @@ https://www.cnblogs.com/Java3y/p/8639937.html  堆排序
 综上，堆排序的时间复杂度为 O(nlogn)
 推到过程 ： https://blog.csdn.net/loveliuzz/article/details/77618530
 
+#include "pch.h"
+#include <iostream>
+#include <math.h>
+#include <algorithm>
+#include <vector>
+#include <stack>
+#include <queue>
+
+using namespace std;
+
+struct TreeNode
+{
+	int val;
+	TreeNode * left;
+	TreeNode * right;
+	TreeNode(int x) :val(x), left(NULL), right(NULL) {
+	}
+};
+
+queue<TreeNode> resQueue;
+
+void WidthTraversal(TreeNode & root)
+{
+	resQueue.push(root);
+	while (!resQueue.empty())
+	{
+		auto queueTop = resQueue.front();
+		if (queueTop.left != NULL)
+			resQueue.push(*queueTop.left);
+		if (queueTop.right != NULL)
+			resQueue.push(*queueTop.right);
+
+		printf("%d\n", resQueue.front().val);
+		resQueue.pop();
+	}
+}
+
+int main()
+{
+	TreeNode root(0);
+	TreeNode level_11(1);
+	TreeNode level_12(2);
+	TreeNode level_21(3);
+	TreeNode level_22(4);
+	TreeNode level_23(5);
+	TreeNode level_24(6);
+	TreeNode level_33(7);
+	TreeNode level_34(8);
+
+	root.left = &level_11;
+	root.right = &level_12;
+	level_11.left = &level_21;
+	level_11.right = &level_22;
+	level_12.left = &level_23;
+	level_12.right = &level_24;
+	level_22.left = &level_33;
+	level_22.right = &level_34;
+
+	WidthTraversal(root);
+	cin.get();
+	return 1;
+}
