@@ -213,3 +213,133 @@ int main()
 
 	return 1;
 }
+
+*************************************************************************************************************************************
+虚函数和虚函数表
+
+包含虚函数的类才会有虚函数表， 同属于一个类的所有对象（以及继承它们的子类）共享一张虚函数表， 但它们有各自指向虚函数表的指针_vptr，这个_vptr放在对象地址开始的地方
+虚函数表实质是一个指针数组，里面存的是虚函数的函数指针。
+
+虚函数表详解：https://blog.csdn.net/primeprime/article/details/80776625
+这些函数指针如何组织，见网站：https://www.cnblogs.com/tao-shao/p/7044577.html
+
+3、存在继承关系的虚函数表（不存在覆盖关系时）
+ 1 #include <iostream>
+ 2 
+ 3 class CBassClass {
+ 4 public:
+ 5     virtual void FunC1(void) { std::cout << "CBassClass FunC1(void)" << std::endl; }
+ 6     virtual void FunC2(void) { std::cout << "CBassClass FunC2(void)" << std::endl; }
+ 7     virtual void FunC3(void) { std::cout << "CBassClass FunC3(void)" << std::endl; }
+ 8 };
+ 9 
+10 class DClass :public CBassClass {
+11 public:
+12     virtual void FunC4(void) { std::cout << "DClass FunC4(void)" << std::endl; }
+13     virtual void FunC5(void) { std::cout << "DClass FunC5(void)" << std::endl; }
+14 };
+15 
+16 typedef void (*pfnFun) (void);
+17 
+18 int main(void)
+19 {    
+20     CBassClass *pBase = new DClass;    // DClass *pBase = new DClass; 结果一样
+21 
+22     std::cout << "虚函数表地址：0x" << (int *)pBase << std::endl;    // 虚函数表地址存在对象所占内存空间的前4个字节
+23     std::cout << "虚函数表中的第一个函数地址：0x" << *((int *)(*(int *)pBase) + 0) << std::endl;
+24     std::cout << "虚函数表中的第二个函数地址：0x" << *((int *)(*(int *)pBase) + 1) << std::endl;
+25     std::cout << "虚函数表中的第三个函数地址：0x" << *((int *)(*(int *)pBase) + 2) << std::endl;
+26     std::cout << "虚函数表中的第四个函数地址：0x" << *((int *)(*(int *)pBase) + 3) << std::endl;
+27     std::cout << "虚函数表中的第五个函数地址：0x" << *((int *)(*(int *)pBase) + 4) << std::endl;
+28     std::cout << "虚函数表中的结束标志：0x" << *((int *)(*(int *)pBase) + 5) << std::endl;
+29 
+30     pfnFun fn = NULL;
+31     for (int i = 0; i < 5; i++) {
+32         fn = (pfnFun)*((int *)(*(int *)pBase) + i);
+33         (*fn)();
+34     }
+35 
+36     delete pBase;
+37 
+38     return 0;
+39 }
+以上代码运行的结果：
+
+ 1 虚函数表地址：0x0052B1C0
+ 2 虚函数表中的第一个函数地址：0x16520113
+ 3 虚函数表中的第二个函数地址：0x16520378
+ 4 虚函数表中的第三个函数地址：0x16520383
+ 5 虚函数表中的第四个函数地址：0x16520423
+ 6 虚函数表中的第五个函数地址：0x16520418
+ 7 虚函数表中的结束标志：0x0
+ 8 CBassClass FunC1(void)
+ 9 CBassClass FunC2(void)
+10 CBassClass FunC3(void)
+11 DClass FunC4(void)
+12 DClass FunC5(void)
+从上面的结果可以看出来，虚函数表中的函数地址是按顺序存放的，派生类继承了基类的虚函数表，然后又在虚函数表中将自己的虚函数的函数地址存放在虚函数表中，
+先存放基类的虚函数后存放派生类的虚函数。
+
+
+4、存在继承关系的虚函数表（存在覆盖关系时）
+
+ 1 #include <iostream>
+ 2 
+ 3 class CBassClass {
+ 4 public:
+ 5     virtual void FunC1(void) { std::cout << "CBassClass FunC1(void)" << std::endl; }
+ 6     virtual void FunC2(void) { std::cout << "CBassClass FunC2(void)" << std::endl; }
+ 7     virtual void FunC3(void) { std::cout << "CBassClass FunC3(void)" << std::endl; }
+ 8 };
+ 9 
+10 class DClass :public CBassClass {
+11 public:
+12     virtual void FunC2(void) { std::cout << "DClass FunC2(void)" << std::endl; }
+13     virtual void FunC3(void) { std::cout << "DClass FunC3(void)" << std::endl; }
+14     virtual void FunC4(void) { std::cout << "DClass FunC4(void)" << std::endl; }
+15     virtual void FunC5(void) { std::cout << "DClass FunC5(void)" << std::endl; }
+16 };
+17 
+18 typedef void (*pfnFun) (void);
+19 
+20 
+21 int main(void)
+22 {    
+23     CBassClass *pBase = new DClass;
+24 
+25     std::cout << "虚函数表地址：0x" << (int *)pBase << std::endl;    // 虚函数表地址存在对象所占内存空间的前4个字节
+26     std::cout << "虚函数表中的第一个函数地址：0x" << *((int *)(*(int *)pBase) + 0) << std::endl;
+27     std::cout << "虚函数表中的第二个函数地址：0x" << *((int *)(*(int *)pBase) + 1) << std::endl;
+28     std::cout << "虚函数表中的第三个函数地址：0x" << *((int *)(*(int *)pBase) + 2) << std::endl;
+29     std::cout << "虚函数表中的第四个函数地址：0x" << *((int *)(*(int *)pBase) + 3) << std::endl;
+30     std::cout << "虚函数表中的第五个函数地址：0x" << *((int *)(*(int *)pBase) + 4) << std::endl;
+31     std::cout << "虚函数表中的结束标志：0x" << *((int *)(*(int *)pBase) + 5) << std::endl;
+32 
+33     pfnFun fn = NULL;
+34     for (int i = 0; i < 5; i++) {
+35         fn = (pfnFun)*((int *)(*(int *)pBase) + i);
+36         (*fn)();
+37     }
+38 
+39     delete pBase;
+40 
+41     return 0;
+42 }
+以上代码运行的结果是：
+
+ 1 虚函数表地址：0x006CB1C0
+ 2 虚函数表中的第一个函数地址：0x267185
+ 3 虚函数表中的第一个函数地址：0x267510
+ 4 虚函数表中的第一个函数地址：0x267505
+ 5 虚函数表中的第一个函数地址：0x267495
+ 6 虚函数表中的第一个函数地址：0x267490
+ 7 CBassClass FunC1(void)
+ 8 DClass FunC2(void)
+ 9 DClass FunC3(void)
+10 DClass FunC4(void)
+11 DClass FunC5(void)
+从结果可以看出来，派生类中重写了基类中的两个虚函数，派生类继承了基类的虚函数表之后，将虚函数表中相应的两个函数指针替换成了派生类自己的虚函数。
+其他的倒是没什么变化。
+
+就是这种替换，能够使pBase基类指针从虚函数表中访问到子类的虚函数。！！！！！！！！！！！！！！！！！！！
+当
