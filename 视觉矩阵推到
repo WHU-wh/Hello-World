@@ -31,7 +31,7 @@ TPoint3<T> PointI2C(const Camera& camera, const TPoint3<T>& ip)
 
 
 template<class T>
-TPoint3<T> PointC2W(const Camera& camera, const TPoint3<T>& cp)  注意旋转矩阵为正交矩阵AAT=E，A的逆=AT（A的转置）
+TPoint3<T> PointC2W(const Camera& camera, const TPoint3<T>& cp)  
 {
 	auto& R = camera.R;
 	auto& C = camera.C;
@@ -42,6 +42,11 @@ TPoint3<T> PointC2W(const Camera& camera, const TPoint3<T>& cp)  注意旋转矩
 	res.z = static_cast<T>(R[2] * cp.x + R[5] * cp.y + R[8] * cp.z + C[2]);
 	return res;
 }
+注意旋转矩阵为正交矩阵AAT=E，A的逆=AT（A的转置）
+本来由物方点坐标转到相机坐标系坐标公式为：先平移再旋转
+Xc R0 R1 R2   (Xw-Xs)
+Yc=R3 R4 R5 * (Yw-Ys)
+Zc R6 R7 R8   (Zw-Zs)
 
 
 https://blog.csdn.net/u013472489/article/details/78736909 摄影测量旋转矩阵知识
