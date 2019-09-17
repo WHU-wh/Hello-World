@@ -11,7 +11,8 @@ TPoint3<T> PointI2C(const Camera& camera, const TPoint2<T>& ip)
 	res[1] =  static_cast<T>((ip.y - K[5])  / K[4]);
 	res[2] = 1;
 	return res;
-}
+}   这个其实就是共线方程的比例关系式，由x/X=f/Z  y/Y=f/Z,可知，现在输入TPoint2<T>& ipt影像行列号，要求X,Y,Z三个未知数求不出来，但是可以求归一化的坐标
+如果要想直到具体的相机坐标系下物方点坐标，要给出具体的Z，下面那个函数就是，输入行列号和物点在相机系下具体的深度Z。
 
 /**
  *@brief 按公式x=fx*X/Z，y=fx*Y/Z的逆运算计算像点从像平面坐标系到对应物点在相机坐标系下的坐标，要先减去主点偏置x0、y0。
