@@ -49,6 +49,19 @@ Yc=R3 R4 R5 * (Yw-Ys)    其中Xs为相机摄影中心在世界坐标系下坐�
 Zc R6 R7 R8   (Zw-Zs)
 
 
+template<class T>
+TPoint2<T> PointW2I(const Camera& camera, const TPoint3<T>& wp)
+{
+	const auto& P = camera.P;
+	TPoint3<T> res ;
+	res.x = static_cast<T>(P[0] * wp.x + P[1] * wp.y + P[2] * wp.z + P[3]);
+	res.y = static_cast<T>(P[4] * wp.x + P[5] * wp.y + P[6] * wp.z + P[7]);
+	res.z = static_cast<T>(P[8] * wp.x + P[9] * wp.y + P[10] * wp.z + P[11]);
+	return { res.x / res.z, res.y / res.z };
+}
+W2I直接用物方点乘P矩阵。
+
+
 https://blog.csdn.net/u013472489/article/details/78736909 摄影测量旋转矩阵知识
 https://blog.csdn.net/baidu_38172402/article/details/82501097 摄影测量内外方位元素
 
