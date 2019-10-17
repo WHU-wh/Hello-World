@@ -1,0 +1,28 @@
+memory头文件中
+shared_ptr允许多个指针指向同一个对象，unique_ptr则“独占”所指向的对象。标准库还定义了一种名为weak_ptr的伴随类，它是一种弱引用，
+指向shared_ptr所管理的对象，这三种智能指针都定义在memory头文件中。
+
+https://blog.csdn.net/flowing_wind/article/details/81301001
+这个头文件中还有很多对智能指针操作的内联函数，如swap（）
+template<class _Ty>
+	void swap(shared_ptr<_Ty>& _Left, shared_ptr<_Ty>& _Right) 交换两个智能指针中的指针。
+  
+  
+2.1 shared_ptr的使用
+    shared_ptr多个指针指向相同的对象。shared_ptr使用引用计数，每一个shared_ptr的拷贝都指向相同的内存。每使用他一次，内部的引用计数加1，每析构一次，
+内部的引用计数减1，减为0时，自动删除所指向的堆内存。shared_ptr内部的引用计数是线程安全的，但是对象的读取需要加锁。
+    初始化。智能指针是个模板类，    
+          1、可以指定类型，传入指针通过构造函数初始化。  std::shared_ptr<int> sh_ptr（new int（10))； 
+          2、也可以使用make_shared函数初始化。  std::shared_ptr<int> sh_ptr = std::make_shared<int>(10);
+          
+    判断内部指针是否为空。      
+    if (!p1)
+		printf("空智能指针");
+    
+    *p1返回智能指针中的值，和普通指针的
+    
+2.2 unique_ptr的使用   
+　   unique_ptr“唯一”拥有其所指对象，同一时刻只能有一个unique_ptr指向给定对象（通过禁止拷贝语义、只有移动语义来实现）。相比与原始指针unique_ptr用于
+ 其RAII的特性，使得在出现异常的情况下，动态资源能得到释放。unique_ptr指针本身的生命周期：从unique_ptr指针创建时开始，直到离开作用域。离开作用域时，
+ 若其指向对象，则将其所指对象销毁(默认使用delete操作符，用户可指定其他操作)。unique_ptr指针与其所指对象的关系：在智能指针生命周期内，
+ 可以改变智能指针所指对象，如创建智能指针时通过构造函数指定、通过reset方法重新指定、通过release方法释放所有权、通过移动语义转移所有权。
