@@ -387,3 +387,6 @@ error LNK****: unresolved external symbol "public: virtual void __thiscall Class
 实际上我个人认为纯虚函数的引入，是出于两个目的
 1、为了安全，因为避免任何需要明确但是因为不小心而导致的未知的结果，提醒子类去做应做的实现。
 2、为了效率，不是程序执行的效率，而是为了编码的效率。
+
+hash函数和hash树
+https://www.cnblogs.com/maybe2030/p/4715035.html#_label6
