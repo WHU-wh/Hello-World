@@ -1,0 +1,33 @@
+1.Warp Divergence
+
+   warp是SM的基本执行单元。一个warp包含32个并行thread，这32个thread执行于SMIT模式。也就是说所有thread 执行同一条指令，并且每个thread会使用各自的
+   data执行该指令。
+   因为所有同一个warp中的thread必须执行相同的指令，那么如果这些线程在遇到控制流语句时，如果进入不同的分支，那么同一时刻除了正在执行的分之外，其余分支
+   都被阻塞了，十分影响性能。这类问题就是warp divergence(warp分歧)。
+   warp divergence问题只会发生在同一个warp中。为了避免warp分歧就要避免同一个warp存在不同的执行路径。
+
+参考 
+http://www.cnblogs.com/1024incn/p/4541313.html
+
+
+2.Bank Conflict
+
+  对于同一个wrap中的线程(一个wrap内包含了32个线程)，访问共享存储器时，以half-wrap的形式分两次访问。同一half-wrap内的线程同时可以访问不同的bank，
+  而不同线程对同一个bank 的访问只能顺序进行。
+
+  所谓的bank-conflict，就是同一half-wrap内的线程，访问了同一bank里的共享内存。bank-conflict会让原本并行的对共享内存的访存操作变成串行从而极大的
+  降低程序效率。 特殊情况是：half-wrap内所有的线程访问同一个共享内存中的同一地址，会产生一次广播，在这种情况下不会发生bank conflict。下面有一些小技巧
+  可以避免bank conflict 或者提高global存储器的访问速度
+
+       1. 尽量按行操作，需要按列操作时可以先对矩阵进行转置
+
+       2. 划分子问题时，使每个block处理的问题宽度恰好为16的整数倍，使得访存可以按照 s_data[tid]=i_data[tid]的形式进行
+
+       3. 使用对齐的数据格式，尽量使用nvidia定义的格式如float3,int2等，这些格式本身已经对齐。
+
+       4. 当要处理的矩阵宽度不是16的整数倍时，将其补为16的整数倍，或者用malloctopitch而不是malloc。
+
+       5. 利用广播，例如s_odata[tid] = tid%16 < 8 ? s_idata[tid] : s_idata[15];会产生8路的块访问冲突而用：s_odata[tid]=s_idata[15];s_odata[tid]= tid%16 < 8 ? s_idata[tid] : s_odata[tid]; 则不会产生块访问冲突
+
+参考 
+http://blog.csdn.net/endlch/article/details/47043069
