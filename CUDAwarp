@@ -1,3 +1,5 @@
+https://www.cnblogs.com/biglucky/p/4279699.html   cuda基本联系，配合之前的reduce1-5笔记。
+
 1.Warp Divergence
 
    warp是SM的基本执行单元。一个warp包含32个并行thread，这32个thread执行于SMIT模式。也就是说所有thread 执行同一条指令，并且每个thread会使用各自的
